@@ -336,6 +336,18 @@ bool Near(const Vector3& p, const float at[3]) {
 
 void Prompt(const std::string& text) { gta::Text(text.c_str(), 0.5f, 0.80f, 0.42f, 255, 255, 255, 255, gta::Align::Centre); }
 
+// The lot's name floating over its entrance marker (seen from kLabelShow metres; smaller farther off).
+constexpr float kLabelShow = 45.0f;
+void Label(const std::string& name, const float at[3], const Vector3& from) {
+    const float dx = at[0] - from.x, dy = at[1] - from.y, dz = at[2] - from.z;
+    const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (d > kLabelShow) return;
+    float sx = 0.0f, sy = 0.0f;
+    if (!Call<BOOL>(gta::GET_SCREEN_COORD_FROM_WORLD_COORD, at[0], at[1], at[2] + 1.6f, &sx, &sy)) return;
+    const float scale = std::clamp(0.62f - d * 0.008f, 0.30f, 0.62f);
+    gta::Text(name.c_str(), sx, sy, scale, 255, 220, 120, 255, gta::Align::Centre);
+}
+
 // The entrance blip on the map, once the lots are known.
 void Blip() {
     if (g_lots.empty() || (g_blip && Call<BOOL>(gta::DOES_BLIP_EXIST, g_blip))) return;
@@ -376,6 +388,7 @@ void Markers(int ped, bool menus) {
         Entrance(i, at);
         at[2] += 1.0f;
         Marker(at, 255, 200, 0);
+        Label(g_lots[i].name, at, p);
         if (Near(p, at)) {
             Prompt("E / D-pad Right: enter " + g_lots[i].name + " skate.Park");
             if (pressed && CanWarp(ped)) Warp(static_cast<int>(i));
@@ -488,6 +501,11 @@ bool Inside() { return g_lot >= 0; }
 bool Busy() { return g_step != Step::Idle; }
 const std::vector<int>& Objects() { return g_pieces; }
 const std::vector<int>& Layout() { return g_layout; }
+std::vector<std::string> Names() {
+    std::vector<std::string> out;
+    for (const Lot& l : g_lots) out.push_back(l.name);
+    return out;
+}
 
 void Tick(bool skating, bool menus) {
     if (g_lots.empty()) return;

@@ -1,4 +1,4 @@
-"""Builds Skate 3's skate.Park lots (Team HQ, Hartley Stadium) as GTA objects,
+"""Builds Skate 3's skate.Park lots (Team HQ, Hartley Stadium, Downtown Skate Park) as GTA objects,
 from the player's own disc. Nothing here is shipped: setup runs it on the
 player's PC.
 
@@ -71,16 +71,28 @@ C = dropper.C
 YTYP = 'sk8v_parks'
 ARCHETYPE_FLAGS = 0x20020  # as the dropper's: Legacy CREATE_OBJECT needs bit 17
 LOD_DISTANCE = 600
-# Each lot: (key, display name, district, GTA origin of its floor centre, collision source).
+# Each lot: (key, display name, district, GTA origin of its floor centre, collision source): 'skate'
+# Skate 3's collision matched to what is drawn (Team HQ's holds every stage of the growing HQ),
+# 'skate-raw' its collision as it is (lots that do not grow), 'render' the drawn faces.
 # Far out west over the sea, apart (each Skate area is 128 m around the skater), 60 m above
 # the water (a fall lands in the sea; not up near the game's height limit); roofed halls. Team HQ's own collision is complete; Hartley Stadium's
 # ground is in simulation records nobody decodes yet (eb0027), so its visible geometry collides.
 LOTS = [
     ('teamhq', 'Team HQ', 'DIST_IndustrialSkatePark', (-4600.0, -3400.0, 60.0), 'skate'),
     ('stadium', 'Hartley Stadium', 'DIST_MegaPark', (-4600.0, -2600.0, 60.0), 'render'),
+    # Downtown Plaza: an open plaza ringed by city blocks (332 x 402 m, towers 165 m tall); its own collision.
+    ('downtown', 'Downtown Skate Park', 'DIST_DownTownSkatePark', (-4600.0, -1800.0, 60.0), 'skate-raw'),
+    # The starter park: a hall (137 x 112 m).
+    ('starter', 'Starter Park', 'DIST_StartPark', (-4600.0, -1000.0, 60.0), 'skate-raw'),
+    # The Maloof Money Cup contest course (147 x 281 m): its course is the level itself, no .park.
+    ('maloof', 'Maloof Money Cup', 'DIST_MaloofMoneyCup', (-4600.0, -200.0, 60.0), 'skate-raw'),
+    # Danny Way's skate school: hills and ramps, about 1 x 1.2 km; far out on its own.
+    ('skateschool', 'Skate School', 'DIST_SkateSchool', (-6200.0, -2000.0, 60.0), 'skate-raw'),
+    # DIST_BlackBoxPark (the space park) is left out: its stream lacks assets its table names.
 ]
 # Skate 3's own park per lot (data/skatepark/<name>.park in miscload.big).
-LAYOUTS = {'teamhq': 'Industrial_Fullpark', 'stadium': 'MegaPark_Fullpark'}
+LAYOUTS = {'teamhq': 'Industrial_Fullpark', 'stadium': 'MegaPark_Fullpark', 'downtown': 'Downtown_Fullpark',
+           'starter': 'Starter_Fullpark'}
 PARKS_BIG = 'data/big/miscload.big'
 # GTA materials.dat indices by the Skate 3 material name's surface word (rust/skatev-runtime/src/materials.rs).
 SURFACE = [('wood', 70), ('metal', 58), ('rail', 59), ('plastic', 84), ('glass', 4), ('grass', 49),
@@ -574,14 +586,18 @@ def floor_height(tris):
     """The lot's floor: the height (1 cm bins) of the most upward-facing area within
     0.6 m of its lowest point (Team HQ's collision floor is at +0.12, Hartley
     Stadium's visible floor at +0.21: a few low bits sit at 0)."""
-    area = {}
+    area, anywhere = {}, {}
     for t in tris:
         n = np.cross(t[1] - t[0], t[2] - t[0]); length = np.linalg.norm(n)
         z = t[:, 2].mean()
-        if length > 1e-9 and n[2] / length > .95 and z < .6:
+        if length > 1e-9 and n[2] / length > .95:
             key = round(float(z), 2)
-            area[key] = area.get(key, 0.0) + length / 2
-    return max(area, key=area.get)
+            anywhere[key] = anywhere.get(key, 0.0) + length / 2
+            if z < .6:
+                area[key] = area.get(key, 0.0) + length / 2
+    # Lots whose low bits sit far under the floor (the Maloof course's pits, the Skate School's
+    # hills): the largest flat level at any height.
+    return max(area or anywhere, key=(area or anywhere).get)
 
 
 def spawn_point(floor_tris, centre):
@@ -593,6 +609,33 @@ def spawn_point(floor_tris, centre):
         if d < best_d:
             best, best_d = c, d
     return best
+
+
+def clear_spawn(item, park_tris, room=2.5, headroom=3.0):
+    """Moves the lot's spawn (and exit) off its Skate 3 park: the floor point nearest the old spawn with
+    no piece within `room` metres that rises over the floor. Unchanged when the spawn is clear."""
+    spawn, floor_z = np.array(item['spawn']), item['spawn'][2] - 1.0
+    tall = park_tris[park_tris[:, :, 2].max(axis=1) > floor_z + 0.05] if len(park_tris) else park_tris
+    tall = tall[tall[:, :, 2].min(axis=1) < floor_z + headroom] if len(tall) else tall
+    if not len(tall):
+        return
+    centres = tall.mean(axis=1)[:, :2]
+    lo, hi = tall[:, :, :2].min(axis=1), tall[:, :, :2].max(axis=1)
+
+    def blocked(p):
+        near = np.all((p[:2] >= lo - room) & (p[:2] <= hi + room), axis=1)
+        return near.any()
+    if not blocked(spawn):
+        return
+    order = np.argsort(np.sum((item['floor_points'][:, :2] - spawn[:2]) ** 2, axis=1))
+    for i in order:
+        p = item['floor_points'][i]
+        if abs(p[2] - floor_z) < 0.05 and not blocked(p):
+            moved = np.array([p[0], p[1], spawn[2]])
+            item['exit'] = (np.array(item['exit']) + moved - spawn).round(3).tolist()
+            item['spawn'] = moved.round(3).tolist()
+            print(f'{item["name"]}: spawn moved off its Skate 3 park to {item["spawn"]}', flush=True)
+            return
 
 
 def lot(key, label, district, origin, source, skate, work, template, textures_out):
@@ -610,7 +653,7 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
     # The lot's collision, then each triangle to one piece: its own render faces
     # ('render'), or the piece whose footprint holds the triangle's centre ('skate').
     owned = [([], []) for _ in parts]
-    if source == 'skate':
+    if source in ('skate', 'skate-raw'):
         boxes = []
         for _, meshes in parts:
             pts = np.concatenate([m[0] for m in meshes])
@@ -619,13 +662,14 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
                     for asset in sim for mesh in decode_rx2_clustered_meshes(asset.data) for tri in mesh.triangles]
         lot_tris, flipped = face_up(lot_tris, floor_height(lot_tris) + 20.0)
         print(f'{label}: {flipped} downward-only floor faces turned up', flush=True)
-        render_tris = [p[face] for _, meshes in parts for p, faces, *_ in meshes for face in faces]
-        before = len(lot_tris)
-        lot_tris = drop_hidden(lot_tris, render_tris)
-        print(f'{label}: collision where nothing is visible dropped ({before} faces in, {len(lot_tris)} out)', flush=True)
-        lot_tris, shown = add_visible(lot_tris, render_tris, floor_height(lot_tris) + 20.0)
-        print(f'{label}: {shown} visible faces with no collision there made to collide', flush=True)
-        lot_tris = lot_tris + boundary(lot_tris, floor_height(lot_tris))
+        if source == 'skate':
+            render_tris = [p[face] for _, meshes in parts for p, faces, *_ in meshes for face in faces]
+            before = len(lot_tris)
+            lot_tris = drop_hidden(lot_tris, render_tris)
+            print(f'{label}: collision where nothing is visible dropped ({before} faces in, {len(lot_tris)} out)', flush=True)
+            lot_tris, shown = add_visible(lot_tris, render_tris, floor_height(lot_tris) + 20.0)
+            print(f'{label}: {shown} visible faces with no collision there made to collide', flush=True)
+            lot_tris = lot_tris + boundary(lot_tris, floor_height(lot_tris))
         if os.environ.get('SK8V_PARKS_DEBUG'):  # development: the lot's final collision, for checks
             np.save(Path(os.environ['SK8V_PARKS_DEBUG']) / f'{key}-collision.npy', np.array(lot_tris))
         for t3 in lot_tris:
@@ -659,6 +703,9 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
     alltris = np.concatenate([d['tris'] for d in drawables if len(d['tris'])])
     # Spawn: on the floor (its main level, not a low bit: a spawn 12 cm under Team HQ's
     # floor bailed the skater at once, 2026-10-15), nearest the lot's centre, 1 m up.
+    # A lot's raw collision can reach far under what is drawn (the Skate School's plane 20 m below its
+    # hills): its floor and spawn come from surfaces at or over its lowest drawn point.
+    alltris = alltris[alltris[:, :, 2].mean(axis=1) > -0.5] if source == 'skate-raw' else alltris
     floor = floor_height(alltris)
     up = []
     for t in alltris:
@@ -666,13 +713,15 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
         if length > 1e-6 and n[2] / length > .95 and abs(t[:, 2].mean() - floor) < .03:
             up.append(t)
     spawn = spawn_point(up, np.zeros(3))
+    floor_points = np.array([t.mean(axis=0) for t in up]) if up else np.zeros((0, 3))
     spawn = np.array([spawn[0], spawn[1], floor]) + origin + [0, 0, 1.0]
     size = hi - lo
     # The exit stands 3 m from the spawn, towards the lot's longer axis.
     exit_point = spawn + ([3, 0, 0] if size[0] >= size[1] else [0, 3, 0])
     return dict(key=key, name=label, district=district, origin=origin.round(3).tolist(), shift=shift.round(6).tolist(),
                 spawn=spawn.round(3).tolist(), heading=0.0, exit=exit_point.round(3).tolist(),
-                size=size.round(2).tolist(), floor=round(float(floor), 3), collision=source, drawables=drawables)
+                size=size.round(2).tolist(), floor=round(float(floor), 3), collision=source, drawables=drawables,
+                floor_points=floor_points + origin)
 
 
 def export(skate, reference, rage, data, world, dropper_receipt=None):
@@ -692,12 +741,12 @@ def export(skate, reference, rage, data, world, dropper_receipt=None):
         # Skate 3's own parks in the lots, as the Object Dropper's models.
         for old in data.glob('*.layout'):
             old.unlink()
-        if dropper_receipt and dropper_receipt.is_file():
+        if dropper_receipt and dropper_receipt.is_file():  # lots without a LAYOUTS entry have their course built in
             objects = json.loads(dropper_receipt.read_text(encoding='utf-8'))['objects']
             pieces = {i: o for o in objects if 'turn' in o for i in o.get('ids', [])}
             tinted = {(o['variant_of'], o['tint']): o['model'] for o in objects if 'variant_of' in o}
             parks = BigArchive(disc_file(skate, PARKS_BIG, work))
-            for item in lots:
+            for item in [i for i in lots if i['key'] in LAYOUTS]:
                 entry = next(e for e in parks.entries if e.path.lower() == f'data/skatepark/{LAYOUTS[item["key"]].lower()}.park')
                 placed = layout(item, park_records(parks.read(entry)), pieces, tinted)
                 # Their Skate collision, in the lot's space (its pieces stand at the origin, unturned).
@@ -709,6 +758,7 @@ def export(skate, reference, rage, data, world, dropper_receipt=None):
                     t3, m3 = cache[model]
                     tris.append(t3 @ quat_matrix(q).T + (pos - np.array(item['origin']))); mats += m3
                 item['layout_tris'] = (np.concatenate(tris), mats) if tris else (np.zeros((0, 3, 3)), [])
+                clear_spawn(item, np.concatenate(tris) + np.array(item['origin']) if tris else np.zeros((0, 3, 3)))
                 rows = ['SK8VLAYOUT 1'] + [f'{joaat(m):08X} {p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {q[0]:.6f} {q[1]:.6f} {q[2]:.6f} {q[3]:.6f}'
                                            for m, p, q in placed]
                 (data / f'{item["key"]}.layout').write_text('\n'.join(rows) + '\n', encoding='utf-8')
@@ -773,7 +823,7 @@ def export(skate, reference, rage, data, world, dropper_receipt=None):
             if park_mats:
                 print(f'{item["name"]}: {len(park_mats)} triangles of its Skate 3 park in its templates', flush=True)
         dropper.update_index(world, hashes)
-        public = lambda i: {k: v for k, v in i.items() if k != 'drawables'} | {
+        public = lambda i: {k: v for k, v in i.items() if k not in ('drawables', 'floor_points')} | {
             'pieces': [{k: v for k, v in d.items() if k not in ('root', 'used', 'tris', 'mats')} for d in i['drawables']]}
         (data / 'parks.json').write_text(json.dumps({'format': 'sk8v-parks-2', 'lots': [public(i) for i in lots]}, indent=2),
                                          encoding='utf-8')

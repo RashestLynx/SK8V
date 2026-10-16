@@ -2657,13 +2657,17 @@ std::vector<menu::Page> MenuPages(Session& s) {
     }});
 
     // Skate 3's «Park crossbar: Skate 3's own lots from the disc (park_lot.h); LB + B builds in them.
-    pages.push_back({"skate.Park", {
-        Action("Enter Team HQ", [] { parklot::Enter(0); }),
-        Action("Enter Hartley Stadium", [] { parklot::Enter(1); }),
-        Action("Save Park", [] { parklot::Save(); }),
-        Action("Load Park", [] { parklot::Load(); }),
-        Action("Exit Park", [] { parklot::Exit(); }),
-    }});
+    {
+        // One "Enter" per lot setup built (parks.txt), then the park actions.
+        std::vector<menu::Item> park;
+        const std::vector<std::string> names = parklot::Names();
+        for (std::size_t i = 0; i < names.size(); ++i)
+            park.push_back(Action("Enter " + names[i], [i] { parklot::Enter(static_cast<int>(i)); }));
+        park.push_back(Action("Save Park", [] { parklot::Save(); }));
+        park.push_back(Action("Load Park", [] { parklot::Load(); }));
+        park.push_back(Action("Exit Park", [] { parklot::Exit(); }));
+        pages.push_back({"skate.Park", park});
+    }
 
     pages.push_back({"Hall of Meat and records", {
         Flag("Hall of Meat", "HallOfMeat", D.hallOfMeat, [&s](const std::string& v) {

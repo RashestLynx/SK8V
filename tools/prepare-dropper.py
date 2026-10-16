@@ -103,7 +103,8 @@ PARK_CATEGORIES = {
     'Branded': ('Branded', METAL), 'Foliage': ('Foliage', WOOD)}
 PARK_MARKERS = {'Teleports', 'Spawner'}
 # Skate 3's own parks the skate.Park lots hold (prepare-park-lots.py's LAYOUTS): their pieces get tinted copies.
-PARK_LAYOUTS = ('data/skatepark/industrial_fullpark.park', 'data/skatepark/megapark_fullpark.park')
+PARK_LAYOUTS = ('data/skatepark/industrial_fullpark.park', 'data/skatepark/megapark_fullpark.park',
+                'data/skatepark/downtown_fullpark.park', 'data/skatepark/starter_fullpark.park')
 PARK_SINK = 0.015  # metres a dropped Create-a-Park piece sits into the ground (dropper_items.inc's floor)
 # Objects whose sloped faces set their facing (a ramp faces local -Y).
 SLOPED = {'an_DMO_UN_PicnicTableRamp'}

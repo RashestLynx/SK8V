@@ -1,5 +1,5 @@
 #pragma once
-// Skate 3's Create-a-Park lots: Team HQ and Hartley Stadium, Skate 3's own
+// Skate 3's Create-a-Park lots: Team HQ, Hartley Stadium and Skate 3's other parks, its own
 // skate.Park lots built from the player's disc (tools/prepare-park-lots.py),
 // far out over the sea; <DataRoot>/private/parks/parks.txt says where and
 // which pieces. Inside, the Object Dropper (LB + B, Skate 3's "Edit park")
@@ -76,7 +76,9 @@ void SetObjects(std::function<std::vector<int>()> objects);
 // Load reports that the dropper cannot restore yet.
 void SetRestore(std::function<bool(const Placed&)> restore);
 
-// Menu actions (script thread). Lot 0 Team HQ, 1 Hartley Stadium.
+// The lots' names, in parks.txt's order (Enter's index).
+std::vector<std::string> Names();
+// Menu actions (script thread). Lots in parks.txt's order (Team HQ, Hartley Stadium, ...).
 void Enter(int lot);
 void Exit();
 void Save();
