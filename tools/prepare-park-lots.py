@@ -30,6 +30,7 @@ import argparse
 import copy
 import importlib.util
 import json
+import os
 import re
 import shutil
 import struct
@@ -344,11 +345,12 @@ def steep(t):
 
 class Near:
     """Is a face near `reference` faces of its kind? At least a third of it: a wall
-    within `reach` of a wall; a floor (or roof, or ramp) within `reach` across and
-    about `rise` up or down of a floor. (A wall near only the floor is not near.)"""
-    def __init__(self, reference, reach=1.0, rise=.1):
+    within `wall` of a wall (1 m kept 2 m stubs of hidden wall beside Team HQ's
+    scaffold towers); a floor (or roof, or ramp) within `reach` across and about
+    `rise` up or down of a floor. (A wall near only the floor is not near.)"""
+    def __init__(self, reference, wall=.5, reach=1.0, rise=.1):
         self.reach = reach
-        self.cells = {True: np.array([reach / 2] * 3), False: np.array([reach / 2, reach / 2, rise / 2])}
+        self.cells = {True: np.array([wall / 2] * 3), False: np.array([reach / 2, reach / 2, rise / 2])}
         self.seen = {True: set(), False: set()}
         for r in reference:
             kind = steep(r)
@@ -359,7 +361,7 @@ class Near:
         kind = steep(t3)
         seen, span = self.seen[kind], range(-2, 3)
         rises = span if kind else range(-1, 2)  # a floor: within 5-10 cm up or down
-        pts = np.floor(surface_points(t3, self.reach / 2) / self.cells[kind]).astype(np.int64)
+        pts = np.floor(surface_points(t3, self.cells[kind][0]) / self.cells[kind]).astype(np.int64)
         near = sum(any((int(x) + dx, int(y) + dy, int(z) + dz) in seen for dx in span for dy in span for dz in rises)
                    for x, y, z in pts)
         return near * 3 >= len(pts)
@@ -404,6 +406,27 @@ def add_visible(tris, render, top):
         if steep(r):
             added.append(r[[0, 2, 1]])
     return tris + added, len(missing)
+
+
+def boundary(tris, floor, height=8.0):
+    """Walls (both ways) round the floor's extent, from the floor `height` m up, and a plate
+    2 cm under the floor across it: Team HQ's east doorways open onto nothing (Skate
+    3's yard outside is not drawn), a ped walked out of them into the sea, and the
+    floor had small holes (2026-10-16). Skate 3's own lots end in such invisible
+    boundaries too."""
+    pts = np.array([v for t3 in tris if not steep(t3) and np.abs(t3[:, 2] - floor).max() < .05 for v in t3])
+    (x0, y0), (x1, y1) = pts[:, :2].min(axis=0), pts[:, :2].max(axis=0)
+    corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    out = []
+    for (ax, ay), (bx, by) in zip(corners, corners[1:] + corners[:1]):
+        a0, b0 = np.array([ax, ay, floor]), np.array([bx, by, floor])
+        a1, b1 = a0 + [0, 0, height], b0 + [0, 0, height]
+        for f in (np.array([a0, b0, b1]), np.array([a0, b1, a1])):
+            out += [f, f[[0, 2, 1]]]
+    z = floor - .02
+    for f in (np.array([[x0, y0, z], [x1, y0, z], [x1, y1, z]]), np.array([[x0, y0, z], [x1, y1, z], [x0, y1, z]])):
+        out += subdivide(f, 8.0)  # the runtime's static area is tiled: no 130 m faces
+    return out
 
 
 def face_up(tris, top, cell=2.0):
@@ -513,6 +536,9 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
         print(f'{label}: collision where nothing is visible dropped ({before} faces in, {len(lot_tris)} out)', flush=True)
         lot_tris, shown = add_visible(lot_tris, render_tris, floor_height(lot_tris) + 20.0)
         print(f'{label}: {shown} visible faces with no collision there made to collide', flush=True)
+        lot_tris = lot_tris + boundary(lot_tris, floor_height(lot_tris))
+        if os.environ.get('SK8V_PARKS_DEBUG'):  # development: the lot's final collision, for checks
+            np.save(Path(os.environ['SK8V_PARKS_DEBUG']) / f'{key}-collision.npy', np.array(lot_tris))
         for t3 in lot_tris:
             c = t3.mean(axis=0)[:2]
             inside = [i for i, (a, b) in enumerate(boxes) if (c >= a).all() and (c <= b).all()]
