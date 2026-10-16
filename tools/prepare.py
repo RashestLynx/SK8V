@@ -109,7 +109,7 @@ class Prepare:
             ('ped-colliders', 'join', ['prepare-ped-colliders.py', 'ped_collider_templates.py'], self.stage_ped_colliders),
             # join: after world, whose template index it adds to (a world rerun reruns it)
             ('dropper', 'join', ['prepare-dropper.py'], self.stage_dropper),
-            # join: after live-clip, whose pack it adds the lots' map to (a live-clip rerun reruns it)
+            # join: after world, whose template index it adds to (a world rerun reruns it)
             ('parks', 'join', ['prepare-park-lots.py', 'prepare-dropper.py'], self.stage_parks),
             ('gta-vehicles', 'gta', ['gta_extract.py', 'build-vehicle-masses.py'], self.stage_vehicles),
             ('world', 'gta', [], self.stage_world),
@@ -154,7 +154,7 @@ class Prepare:
         archive, path = SHADER_REFERENCE
         gta_extract.extract(binary(RPF), self.keys, self.gta / archive, [path], self.work / 'shader-reference')
         py('prepare-park-lots.py', '--skate', self.a.skate, '--shader-reference', self.work / 'shader-reference' / path,
-           '--rage', RAGE, '--pack', self.clip / 'dlc.rpf', '--out', self.out / 'parks', '--data', self.assets / 'private/parks')
+           '--rage', RAGE, '--data', self.assets / 'private/parks', '--world', self.world)
 
     def stage_hom_hud(self):
         py('prepare-hom-hud.py', '--game', self.disc, '--assets', self.assets)
@@ -348,10 +348,8 @@ class Prepare:
         return progress
 
     def plan(self):
-        # The pack with the skate.Park lots' map (parks stage) when there is one, else live_clip's.
-        pack = self.out / 'parks/dlc.rpf' if (self.out / 'parks/dlc.rpf').is_file() else self.clip / 'dlc.rpf'
         files = {'SkateVLegacy.asi': PACKAGE / 'SkateVLegacy.asi', 'SkateVRuntime.dll': PACKAGE / 'SkateVRuntime.dll',
-                 PACK + r'\dlc.rpf': pack, PACK + r'\hud.gfx': self.clip / 'hud.gfx'}
+                 PACK + r'\dlc.rpf': self.clip / 'dlc.rpf', PACK + r'\hud.gfx': self.clip / 'hud.gfx'}
         return {'files': {k: str(v) for k, v in files.items()},
                 'ini': {'DataRoot': str(self.assets), 'WorldCache': str(self.world), 'AudioCache': str(self.audio),
                         'PedCache': str(self.peds), 'PedPoseCollision': 1, 'LiveClip': int(bool(self.clip_ok)),
