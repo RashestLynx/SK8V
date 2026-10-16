@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <share.h>
 #include "board_native.h"
 #include "board_stencil.h"
@@ -2734,6 +2736,46 @@ std::vector<menu::Page> MenuPages(Session& s) {
     return pages;
 }
 
+// Dev: commands from %LOCALAPPDATA%\SkateV\dev-command.txt (checked twice a second, then
+// deleted), so a test run can drive the park lots without input into GTA's window:
+//   park enter <lot> | park exit | skate (on / off) | pos | tp <x> <y> <z>
+// Each command and its result goes to the log.
+void DevCommand(Session& s) {
+    static DWORD next = 0;
+    const DWORD now = GetTickCount();
+    if (static_cast<int>(now - next) < 0) return;
+    next = now + 500;
+    const std::wstring path = g_logDir + L"dev-command.txt";
+    std::ifstream in(path);
+    if (!in) return;
+    std::string line;
+    std::getline(in, line);
+    in.close();
+    DeleteFileW(path.c_str());
+    Logf("SkateV dev: command '%s'", line.c_str());
+    std::istringstream words(line);
+    std::string verb, what;
+    words >> verb;
+    const Ped ped = Call<Ped>(gta::PLAYER_PED_ID);
+    if (verb == "park" && (words >> what)) {
+        int lot = 0;
+        if (what == "enter" && (words >> lot)) parklot::Enter(lot);
+        else if (what == "exit") parklot::Exit();
+    } else if (verb == "skate") {
+        g_toggleRequested.store(true);
+    } else if (verb == "pos") {
+        const Vector3 p = Call<Vector3>(gta::GET_ENTITY_COORDS, ped, 1);
+        float ground = 0.0f;
+        const BOOL hit = Call<BOOL>(gta::GET_GROUND_Z_FOR_3D_COORD, p.x, p.y, p.z + 2.0f, &ground, 0, 0);
+        Logf("SkateV dev: ped at (%.2f, %.2f, %.2f), ground %s %.2f, state %s, in a park %d, skater (%.2f, %.2f, %.2f)", p.x, p.y, p.z,
+             hit ? "at" : "not found", ground, lifecycle::Name(s.state), parklot::Inside() ? 1 : 0, s.last.skater_position.x,
+             s.last.skater_position.y, s.last.skater_position.z);
+    } else if (verb == "tp") {
+        float x = 0, y = 0, z = 0;
+        if (words >> x >> y >> z) Call<void>(gta::SET_ENTITY_COORDS_NO_OFFSET, ped, x, y, z, 0, 0, 0);
+    }
+}
+
 void ScriptMain() {
     Log("SkateV Legacy: ScriptMain start");
     dropper::SetLog(Log);
@@ -2850,6 +2892,7 @@ void ScriptMain() {
     for (;;) {
         const double workStart = monitor.Now();
         LapStart();
+        DevCommand(s);
         const bool f6 = g_toggleRequested.exchange(false);
         {
             static bool showList = false;
