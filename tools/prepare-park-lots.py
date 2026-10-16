@@ -64,12 +64,12 @@ YTYP = 'sk8v_parks'
 ARCHETYPE_FLAGS = 0x20020  # as the dropper's: Legacy CREATE_OBJECT needs bit 17
 LOD_DISTANCE = 600
 # Each lot: (key, display name, district, GTA origin of its floor centre, collision source).
-# Far out west over the sea, apart (each Skate area is 128 m around the skater), well above
-# the water; both lots are roofed halls. Team HQ's own collision is complete; Hartley Stadium's
+# Far out west over the sea, apart (each Skate area is 128 m around the skater), 60 m above
+# the water (a fall lands in the sea; not up near the game's height limit); roofed halls. Team HQ's own collision is complete; Hartley Stadium's
 # ground is in simulation records nobody decodes yet (eb0027), so its visible geometry collides.
 LOTS = [
-    ('teamhq', 'Team HQ', 'DIST_IndustrialSkatePark', (-4600.0, -3400.0, 400.0), 'skate'),
-    ('stadium', 'Hartley Stadium', 'DIST_MegaPark', (-4600.0, -2600.0, 400.0), 'render'),
+    ('teamhq', 'Team HQ', 'DIST_IndustrialSkatePark', (-4600.0, -3400.0, 60.0), 'skate'),
+    ('stadium', 'Hartley Stadium', 'DIST_MegaPark', (-4600.0, -2600.0, 60.0), 'render'),
 ]
 # GTA materials.dat indices by the Skate 3 material name's surface word (rust/skatev-runtime/src/materials.rs).
 SURFACE = [('wood', 70), ('metal', 58), ('rail', 59), ('plastic', 84), ('glass', 4), ('grass', 49),
@@ -311,6 +311,20 @@ def write(root, path):
     ET.indent(root); ET.ElementTree(root).write(path, encoding='utf-8', xml_declaration=True)
 
 
+def floor_height(tris):
+    """The lot's floor: the height (1 cm bins) of the most upward-facing area within
+    0.6 m of its lowest point (Team HQ's collision floor is at +0.12, Hartley
+    Stadium's visible floor at +0.21: a few low bits sit at 0)."""
+    area = {}
+    for t in tris:
+        n = np.cross(t[1] - t[0], t[2] - t[0]); length = np.linalg.norm(n)
+        z = t[:, 2].mean()
+        if length > 1e-9 and n[2] / length > .95 and z < .6:
+            key = round(float(z), 2)
+            area[key] = area.get(key, 0.0) + length / 2
+    return max(area, key=area.get)
+
+
 def spawn_point(floor_tris, centre):
     """The floor point nearest the lot's centre (GTA space), and the heading facing the centre's longer side."""
     best, best_d = None, 1e18
@@ -358,11 +372,12 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
         # seams some vertices sit 21 cm low, a ledge across Hartley Stadium's floor that threw
         # the board around (2026-10-15). Whatever lies within half a metre of the floor is
         # flattened onto it.
+        floor = floor_height([p[face] for _, meshes in parts for p, faces, *_ in meshes for face in faces])
         for i, (_, meshes) in enumerate(parts):
             for p, faces, _, material, _ in meshes:
                 m = surface(material)
                 q = p.copy()
-                q[np.abs(q[:, 2]) < .5, 2] = 0.0
+                q[np.abs(q[:, 2] - floor) < .5, 2] = floor
                 for face in faces:
                     owned[i][0].append(q[face]); owned[i][1].append(m)
     drawables = []
@@ -373,19 +388,22 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
         drawables.append(dict(name=name, root=root, used=used, asset=asset, meshes=len(meshes), tris=tris, mats=mats,
                               triangles=int(sum(len(m[1]) for m in meshes)), collision_polygons=polys))
     alltris = np.concatenate([d['tris'] for d in drawables if len(d['tris'])])
-    # Spawn: the floor point (upward faces at the floor's height) nearest the lot's centre.
+    # Spawn: on the floor (its main level, not a low bit: a spawn 12 cm under Team HQ's
+    # floor bailed the skater at once, 2026-10-15), nearest the lot's centre, 1 m up.
+    floor = floor_height(alltris)
     up = []
     for t in alltris:
         n = np.cross(t[1] - t[0], t[2] - t[0]); length = np.linalg.norm(n)
-        if length > 1e-6 and n[2] / length > .95 and abs(t[:, 2].mean()) < .5:
+        if length > 1e-6 and n[2] / length > .95 and abs(t[:, 2].mean() - floor) < .03:
             up.append(t)
-    spawn = spawn_point(up, np.zeros(3)) + origin + [0, 0, 1.0]
+    spawn = spawn_point(up, np.zeros(3))
+    spawn = np.array([spawn[0], spawn[1], floor]) + origin + [0, 0, 1.0]
     size = hi - lo
     # The exit stands 3 m from the spawn, towards the lot's longer axis.
     exit_point = spawn + ([3, 0, 0] if size[0] >= size[1] else [0, 3, 0])
     return dict(key=key, name=label, district=district, origin=origin.round(3).tolist(),
                 spawn=spawn.round(3).tolist(), heading=0.0, exit=exit_point.round(3).tolist(),
-                size=size.round(2).tolist(), collision=source, drawables=drawables)
+                size=size.round(2).tolist(), floor=round(float(floor), 3), collision=source, drawables=drawables)
 
 
 def export(skate, reference, rage, data, world):
