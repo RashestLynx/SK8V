@@ -4,10 +4,12 @@
 #include <main.h>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include "host_util.h"
 #include "natives.h"
+#include "streaming.h"
 
 namespace parklot {
 
@@ -51,13 +53,17 @@ std::vector<Lot> ParseLots(const std::string& text) {
         std::vector<std::string> cols;
         std::istringstream row(line);
         for (std::string col; std::getline(row, col, '\t');) cols.push_back(col);
-        if (cols.size() != 7) continue;
+        if (cols.size() != 8) continue;
         Lot lot;
         lot.key = cols[0], lot.name = cols[1];
         const auto three = [](const std::string& s, float* v) { return sscanf_s(s.c_str(), "%f %f %f", v, v + 1, v + 2) == 3; };
         if (!three(cols[2], lot.spawn) || sscanf_s(cols[3].c_str(), "%f", &lot.heading) != 1 || !three(cols[4], lot.exit) ||
             !three(cols[5], lot.origin) || sscanf_s(cols[6].c_str(), "%f", &lot.reach) != 1 || lot.key.empty())
             continue;
+        std::istringstream pieces(cols[7]);
+        for (std::string piece; std::getline(pieces, piece, ',');)
+            if (!piece.empty()) lot.pieces.push_back(piece);
+        if (lot.pieces.empty()) continue;
         lots.push_back(lot);
     }
     return lots;
@@ -76,8 +82,12 @@ constexpr float kMarkerRadius = 1.6f, kMarkerShow = 120.0f;
 constexpr int kContext = 51;  // INPUT_CONTEXT: E, d-pad right
 constexpr int kFadeMs = 500;
 constexpr DWORD kFadeTimeout = 3000, kSettleTimeout = 15000, kStreamMs = 1500;
-// Below the lot's floor by this much: fell out of it (back to its spawn).
+// Below the lot's floor by this much: fell out of it (back to its spawn, at
+// most kFalls times in a row; then out by the door: the lot did not load).
 constexpr float kFallBelow = 25.0f;
+constexpr int kFalls = 3;
+// The pieces' models stream in this long at most before the warp gives up.
+constexpr DWORD kModelTimeout = 15000;
 
 enum class Step { Idle, FadeOut, Settle };
 
@@ -97,6 +107,13 @@ bool g_frozen = false;
 float g_doorZ = kDoorZ;
 bool g_doorGround = false;
 int g_blip = 0;
+int g_falls = 0;
+// The lots' models: <DataRoot>/private/parks, registered once per process.
+std::filesystem::path g_dir;
+bool g_registered = false, g_registerFailed = false;
+// The spawned pieces and their lot (-1: none).
+std::vector<int> g_pieces;
+int g_piecesLot = -1;
 
 void Log(const std::string& s) {
     if (g_log) g_log(("SkateV park: " + s).c_str());
@@ -124,6 +141,84 @@ void Entrance(std::size_t i, float out[3]) {
 void Unfreeze(int ped) {
     if (g_frozen && Call<BOOL>(gta::DOES_ENTITY_EXIST, ped)) Call<void>(gta::FREEZE_ENTITY_POSITION, ped, 0);
     g_frozen = false;
+}
+
+// The lots' .ydr and .ytyp, registered like the dropper's objects (streaming.h).
+void Register() {
+    if (g_registered || g_registerFailed || g_dir.empty() || !streaming::Ready()) return;
+    const auto ytyp = g_dir / L"sk8v_parks.ytyp";
+    const bool present = std::filesystem::is_regular_file(ytyp);
+    if (!present || !streaming::Guards()) {
+        g_registerFailed = true;
+        Log(present ? "3889 streaming function guards differ" : "no lot models (rerun SK8V setup)");
+        return;
+    }
+    const auto reg = streaming::Registrar();
+    int count = 0;
+    for (const Lot& l : g_lots)
+        for (const std::string& piece : l.pieces) {
+            const auto ydr = g_dir / (piece + ".ydr");
+            const std::string path = streaming::NarrowAnsi(ydr), name = piece + ".ydr";
+            if (path.empty() || !std::filesystem::is_regular_file(ydr)) continue;
+            std::uint32_t id = ~0u;
+            reg(&id, path.c_str(), true, name.c_str(), false, false);
+            if (id != ~0u) ++count;
+        }
+    const std::string path = streaming::NarrowAnsi(ytyp);
+    std::uint32_t id = ~0u;
+    if (!path.empty()) reg(&id, path.c_str(), true, "sk8v_parks.ytyp", false, false);
+    if (id == ~0u) {
+        g_registerFailed = true;
+        Log("lot types did not register");
+        return;
+    }
+    streaming::TypeLoader()("sk8v_parks.ytyp");
+    g_registered = true;
+    Log(std::to_string(count) + " lot models registered");
+}
+
+bool PiecesLoaded(int lot) {
+    bool all = true;
+    for (const std::string& piece : g_lots[static_cast<std::size_t>(lot)].pieces) {
+        const Hash h = util::Joaat(piece);
+        if (!Call<BOOL>(gta::HAS_MODEL_LOADED, h)) {
+            Call<void>(gta::REQUEST_MODEL, h);
+            all = false;
+        }
+    }
+    return all;
+}
+
+void DeletePieces() {
+    for (int object : g_pieces) {
+        if (!Call<BOOL>(gta::DOES_ENTITY_EXIST, object)) continue;
+        Call<void>(gta::SET_ENTITY_AS_MISSION_ENTITY, object, 1, 1);
+        Call<void>(gta::DELETE_OBJECT, &object);
+    }
+    if (g_piecesLot >= 0)
+        for (const std::string& piece : g_lots[static_cast<std::size_t>(g_piecesLot)].pieces)
+            Call<void>(gta::SET_MODEL_AS_NO_LONGER_NEEDED, util::Joaat(piece));
+    g_pieces.clear();
+    g_piecesLot = -1;
+}
+
+// Every piece of the lot, frozen at its origin (they share it), ours (mission entities).
+void SpawnPieces(int lot) {
+    DeletePieces();
+    const Lot& l = g_lots[static_cast<std::size_t>(lot)];
+    for (const std::string& piece : l.pieces) {
+        const int object = Call<int>(gta::CREATE_OBJECT_NO_OFFSET, util::Joaat(piece), l.origin[0], l.origin[1], l.origin[2],
+                                     false, false, false, 0);
+        if (!object) {
+            Log("piece " + piece + " did not spawn");
+            continue;
+        }
+        Call<void>(gta::SET_ENTITY_AS_MISSION_ENTITY, object, 1, 1);
+        Call<void>(gta::FREEZE_ENTITY_POSITION, object, 1);
+        g_pieces.push_back(object);
+    }
+    g_piecesLot = lot;
+    Log(l.name + ": " + std::to_string(g_pieces.size()) + " of " + std::to_string(l.pieces.size()) + " pieces spawned");
 }
 
 bool CanWarp(int ped) {
@@ -172,6 +267,7 @@ void Finish(int ped, bool arrived) {
     Call<void>(gta::DO_SCREEN_FADE_IN, kFadeMs);
     if (arrived) {
         g_lot = g_target;
+        if (g_lot < 0) DeletePieces();
         Say(g_lot >= 0 ? g_lots[static_cast<std::size_t>(g_lot)].name +
                              " skate.Park: LB + B builds; the exit marker or the SK8V menu takes you back"
                        : "Left the skate.Park");
@@ -252,6 +348,7 @@ void Start(LogFn log, std::function<void(const std::string&)> notify, const std:
     std::stringstream text;
     if (in) text << in.rdbuf();
     g_lots = ParseLots(text.str());
+    g_dir = std::filesystem::path(lotsFile).parent_path();
     std::string names;
     for (const Lot& l : g_lots) names += (names.empty() ? "" : ", ") + l.name;
     Log(g_lots.empty() ? "no Skate 3 park lots (rerun SK8V setup)" : std::to_string(g_lots.size()) + " lots: " + names);
@@ -269,6 +366,7 @@ void Enter(int lot) {
         Say("Already in " + g_lots[static_cast<std::size_t>(lot)].name);
         return;
     }
+    g_falls = 0;
     if (CanWarp(ped)) Warp(lot);
 }
 
@@ -335,9 +433,11 @@ void Load() {
 
 bool Inside() { return g_lot >= 0; }
 bool Busy() { return g_step != Step::Idle; }
+const std::vector<int>& Objects() { return g_pieces; }
 
 void Tick(bool skating, bool menus) {
     if (g_lots.empty()) return;
+    Register();
     Blip();
     const int ped = Call<int>(gta::PLAYER_PED_ID);
     if (!Call<BOOL>(gta::DOES_ENTITY_EXIST, ped)) return;
@@ -349,8 +449,13 @@ void Tick(bool skating, bool menus) {
             const Vector3 at = Call<Vector3>(gta::GET_ENTITY_COORDS, ped, 1);
             const float dx = at.x - l.origin[0], dy = at.y - l.origin[1];
             if (dx * dx + dy * dy < l.reach * l.reach && at.z < l.origin[2] - kFallBelow && !Call<BOOL>(gta::IS_ENTITY_DEAD, ped, 0)) {
-                Log("fell out of " + l.name + ": back to its spawn");
-                Warp(g_lot);
+                if (++g_falls > kFalls) {
+                    Say(l.name + "'s floor did not load: back by the hangar");
+                    Warp(-1);
+                } else {
+                    Log("fell out of " + l.name + ": back to its spawn");
+                    Warp(g_lot);
+                }
                 return;
             }
             // Gone some other way (death, a trainer's teleport, a mission): out after 3 s away,
@@ -363,6 +468,7 @@ void Tick(bool skating, bool menus) {
             } else if (GetTickCount() - outside > 3000) {
                 outside = 0;
                 g_lot = -1;
+                DeletePieces();
                 Log("player left the lot without the exit");
             }
         }
@@ -371,6 +477,21 @@ void Tick(bool skating, bool menus) {
     }
     case Step::FadeOut:
         if (!Call<BOOL>(gta::IS_SCREEN_FADED_OUT) && since < kFadeTimeout) return;
+        // Into a lot: its pieces first (their models stream from anywhere), then the player.
+        if (g_target >= 0 && g_piecesLot != g_target) {
+            if (!g_registered) {
+                Say("The skate.Park lots are not set up: rerun SK8V setup");
+                Finish(ped, false);
+                return;
+            }
+            if (!PiecesLoaded(g_target)) {
+                if (since < kModelTimeout) return;
+                Say(g_lots[static_cast<std::size_t>(g_target)].name + "'s models did not load");
+                Finish(ped, false);
+                return;
+            }
+            SpawnPieces(g_target);
+        }
         Place(ped, skating);
         SetStep(Step::Settle);
         return;

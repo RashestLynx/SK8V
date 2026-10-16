@@ -1,10 +1,10 @@
-"""Builds Skate 3's skate.Park lots (Team HQ, Hartley Stadium) as a GTA map,
+"""Builds Skate 3's skate.Park lots (Team HQ, Hartley Stadium) as GTA objects,
 from the player's own disc. Nothing here is shipped: setup runs it on the
 player's PC.
 
     python tools/prepare-park-lots.py --skate <disc image or extracted folder>
         --shader-reference <owned normal_spec .ydr> --rage build/tools/rage.exe
-        --pack <live-clip>/dlc.rpf --out <out>/parks --data <assets>/private/parks
+        --data <assets>/private/parks --world <world>/sk8v.svwc
 
 Source (owned disc): data/content/worldDIST_<lot>.big holds the lot's world
 stream (data/content/world/stream/DIST_<lot>): the global presentation stream
@@ -12,15 +12,17 @@ has its models (mdl_parser) and textures (rx2_parser), the global simulation
 stream Skate's collision (RenderWare ClusteredMesh, retail_collision_mesh).
 A mesh's material name ends in its diffuse texture id.
 
-Output:
-- <out>/sk8v_parks.rpf: a GTA map: per lot its drawables (normal_spec, embedded
-  textures), one static collision bound (.ybn, world space) and a .ymap placing
-  the lot far out over the sea; sk8v_parks.ytyp and _manifest.ymf.
-- <out>/dlc.rpf: SK8V's pack (--pack, from live_clip) with the map added and
-  enabled at startup (content.xml), so Story Mode streams the lots like any map
-  and GTA's physics level holds their collision (the runtime reads it, live.rs).
-- <data>/parks.json (and parks.txt, which the host's park_lot reads): per lot its
-  name, where it is, the spawn and exit points; receipt.json.
+Output (loaded like the Object Dropper's objects, never through the startup
+pack: a GTA map in SK8V's dlc.rpf crashed Story Mode, 2026-10-15):
+- <data>/sk8v_<lot>_<n>.ydr per model asset: render meshes (normal_spec,
+  embedded textures) and the piece's share of the lot's collision as an
+  embedded bound (BVH), so GTA's peds walk on it; sk8v_parks.ytyp (flags
+  0x20020: CREATE_OBJECT needs them). The host registers them and spawns
+  every piece of a lot, frozen, at the lot's origin.
+- <world>.prop-models/<hash>.svwc + index lines: each piece's exact template,
+  which the runtime builds into the static area (Skate collision, rails).
+- <data>/parks.txt (the host's park_lot reads it) and parks.json: per lot its
+  name, origin, spawn, exit and pieces; receipt.json.
 Space: Skate's Y-up metres -> GTA C=(x,-z,y) (as prepare-dropper.py), centred
 on X/Y, the floor at the lot's origin height.
 """
@@ -59,7 +61,7 @@ node, f, vec, tangents, bound_fields = dropper.node, dropper.f, dropper.vec, dro
 
 C = dropper.C
 YTYP = 'sk8v_parks'
-RPF = 'sk8v_parks.rpf'
+ARCHETYPE_FLAGS = 0x20020  # as the dropper's: Legacy CREATE_OBJECT needs bit 17
 LOD_DISTANCE = 600
 # Each lot: (key, display name, district, GTA origin of its floor centre, collision source).
 # Far out west over the sea, apart (each Skate area is 128 m around the skater), well above
@@ -175,7 +177,7 @@ def models(assets):
     return out
 
 
-def drawable(name, meshes, textures, template, flat, spec):
+def drawable(name, meshes, textures, template, flat, spec, tris=(), mats=()):
     root = ET.Element('Drawable'); node(root, 'Name', name)
     allp = np.concatenate([m[0] for m in meshes])
     lo, hi = allp.min(axis=0), allp.max(axis=0); centre = (lo + hi) / 2
@@ -229,18 +231,20 @@ def drawable(name, meshes, textures, template, flat, spec):
                 for j in range(len(p))]
         node(vb, 'Data', '\n' + '\n'.join(rows) + '\n')
         node(node(g, 'IndexBuffer'), 'Data', ' '.join(map(str, faces.ravel())))
+    polys = embed_bound(root, tris, mats) if len(tris) else 0
     node(root, 'Lights')
-    return root, used
+    return root, used, polys
 
 
-# Static map collision: what GTA's own map bounds carry (reh_dlc_int_03_sum2.ybn).
+# What GTA's own map and skate-prop bounds carry (reh_dlc_int_03_sum2.ybn, prop_skate_kickers).
 FLAGS1 = 'MAP_WEAPON, MAP_DYNAMIC, MAP_ANIMAL, MAP_COVER, MAP_VEHICLE'
 FLAGS2 = ('VEHICLE_NOT_BVH, VEHICLE_BVH, PED, RAGDOLL, ANIMAL, ANIMAL_RAGDOLL, OBJECT, PLANT, PROJECTILE, EXPLOSION, '
           'FORKLIFT_FORKS, TEST_WEAPON, TEST_CAMERA, TEST_AI, TEST_SCRIPT, TEST_VEHICLE_WHEEL, GLASS')
 
 
-def collision(tris, materials):
-    """A static map bound (BVH geometry) over world-space triangles, one GTA material each."""
+def embed_bound(root, tris, materials):
+    """The piece's collision as the drawable's embedded bound: a composite with
+    one BVH geometry (vertices about its centre), one GTA material each."""
     mats = sorted(set(materials))
     vertices, index, polys = [], {}, []
     for t, m in zip(tris, materials):
@@ -254,7 +258,6 @@ def collision(tris, materials):
             polys.append((mats.index(m), ids))
     v = np.array(vertices, np.float64)
     lo, hi = v.min(axis=0), v.max(axis=0)
-    root = ET.Element('BoundsFile')
     composite = node(root, 'Bounds', type='Composite')
     bound_fields(composite, lo, hi, 0, 0, 0)
     child = node(node(composite, 'Children'), 'Item', type='GeometryBVH')
@@ -274,35 +277,30 @@ def collision(tris, materials):
     polygons = node(child, 'Polygons')
     for m, (a, b, c) in polys:
         node(polygons, 'Triangle', m=m, v1=a, v2=b, v3=c, f1=0, f2=0, f3=0)
-    return root, len(polys)
+    return len(polys)
 
 
-def ymap(name, entities, lo, hi):
-    """CMapData placing the lot's drawables (rage `resource recalc` sets extents and flags)."""
-    root = ET.Element('CMapData')
-    node(root, 'name', name); node(root, 'parent'); node(root, 'flags', value=0); node(root, 'contentFlags', value=1)
-    vec(root, 'streamingExtentsMin', lo - LOD_DISTANCE); vec(root, 'streamingExtentsMax', hi + LOD_DISTANCE)
-    vec(root, 'entitiesExtentsMin', lo); vec(root, 'entitiesExtentsMax', hi)
-    items = node(root, 'entities')
-    for archetype, position in entities:
-        e = node(items, 'Item', type='CEntityDef')
-        node(e, 'archetypeName', archetype); node(e, 'flags', value=0); node(e, 'guid', value=joaat(archetype))
-        vec(e, 'position', position); vec(e, 'rotation', [0, 0, 0, 1])
-        node(e, 'scaleXY', value=1); node(e, 'scaleZ', value=1); node(e, 'parentIndex', value=-1)
-        node(e, 'lodDist', value=LOD_DISTANCE); node(e, 'childLodDist', value=0)
-        node(e, 'lodLevel', 'LODTYPES_DEPTH_ORPHANHD'); node(e, 'numChildren', value=0)
-        node(e, 'priorityLevel', 'PRI_REQUIRED'); node(e, 'extensions')
-        node(e, 'ambientOcclusionMultiplier', value=255); node(e, 'artificialAmbientOcclusion', value=255)
-        node(e, 'tintValue', value=0)
-    for tag in ['containerLods', 'boxOccluders', 'occludeModels', 'physicsDictionaries', 'instancedData',
-                'timeCycleModifiers', 'carGenerators', 'LODLightsSOA', 'DistantLODLightsSOA']:
-        node(root, tag)
-    block = node(root, 'block')
-    for key, value in [('version', 0), ('flags', 0)]:
-        node(block, key, value=value)
-    for key, text in [('name', name), ('exportedBy', 'SK8V prepare-park-lots.py'), ('owner', ''), ('time', '')]:
-        node(block, key, text)
-    return root
+def write_svwc(path, tris, materials, tile=64.0):
+    """SVWC 3 (rust/svwc), tiles stored raw, one GTA material per triangle (prepare-dropper.py's, per triangle)."""
+    tiles = {}
+    for i, t in enumerate(tris):
+        lo = np.floor(t[:, :2].min(axis=0) / tile).astype(int); hi = np.floor(t[:, :2].max(axis=0) / tile).astype(int)
+        for tx in range(lo[0], hi[0] + 1):
+            for ty in range(lo[1], hi[1] + 1):
+                tiles.setdefault((tx, ty), []).append(i)
+    order = sorted(tiles)
+    records = sum(len(tiles[k]) for k in order)
+    out = bytearray(b'SVWC' + struct.pack('<IfII', 3, tile, len(order), records))
+    first = 0
+    for k in order:
+        out += struct.pack('<iiII', *k, first, len(tiles[k])); first += len(tiles[k])
+    at = 0
+    for k in order:
+        out += struct.pack('<QI', at, 0); at += len(tiles[k]) * 40
+    for k in order:
+        for i in tiles[k]:
+            out += struct.pack('<9f', *np.asarray(tris[i], np.float32).ravel()) + bytes([materials[i], 0, 0, 0])
+    path.write_bytes(out)
 
 
 def write(root, path):
@@ -320,7 +318,7 @@ def spawn_point(floor_tris, centre):
     return best
 
 
-def lot(key, label, district, origin, source, skate, work, template, textures_out, rage):
+def lot(key, label, district, origin, source, skate, work, template, textures_out):
     origin = np.array(origin)
     lot_work = work / key; lot_work.mkdir(parents=True)
     pres, sim = stream(disc_lot(skate, district, work), district, lot_work)
@@ -332,32 +330,42 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
     shift = np.array([-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, -lo[2]])  # centred, floor at 0
     parts = [(asset, [(p + shift, faces, uv, material, texture) for p, faces, uv, material, texture in meshes])
              for asset, meshes in parts]
-    drawables = []
-    for i, (asset, meshes) in enumerate(parts):
-        name = f'sk8v_{key}_{i}'
-        root, used = drawable(name, meshes, textures, template, flat, spec)
-        drawables.append(dict(name=name, root=root, used=used, asset=asset, meshes=len(meshes),
-                              triangles=int(sum(len(m[1]) for m in meshes))))
+    # The lot's collision, then each triangle to one piece: its own render faces
+    # ('render'), or the piece whose footprint holds the triangle's centre ('skate').
+    owned = [([], []) for _ in parts]
     if source == 'skate':
-        tris, mats = [], []
+        boxes = []
+        for _, meshes in parts:
+            pts = np.concatenate([m[0] for m in meshes])
+            boxes.append((pts.min(axis=0)[:2] - 1, pts.max(axis=0)[:2] + 1))
         for asset in sim:
             for mesh in decode_rx2_clustered_meshes(asset.data):
-                for t in mesh.triangles:
-                    tris.append(np.array([t.a, t.b, t.c], np.float64) @ C.T + shift)
-                    mats.append(CONCRETE)
+                for tri in mesh.triangles:
+                    t3 = np.array([tri.a, tri.b, tri.c], np.float64) @ C.T + shift
+                    c = t3.mean(axis=0)[:2]
+                    inside = [i for i, (a, b) in enumerate(boxes) if (c >= a).all() and (c <= b).all()]
+                    if inside:
+                        i = min(inside, key=lambda i: np.prod(boxes[i][1] - boxes[i][0]))
+                    else:
+                        i = min(range(len(boxes)), key=lambda i: np.sum(((boxes[i][0] + boxes[i][1]) / 2 - c) ** 2))
+                    owned[i][0].append(t3); owned[i][1].append(CONCRETE)
     else:
-        tris, mats = [], []
-        for _, meshes in parts:
+        for i, (_, meshes) in enumerate(parts):
             for p, faces, _, material, _ in meshes:
                 m = surface(material)
                 for face in faces:
-                    tris.append(p[face]); mats.append(m)
-    tris = np.array(tris)
-    bound, polys = collision(tris + origin, mats)
-    write(bound, lot_work / f'sk8v_{key}.ybn.xml')
-    # Floor: upward faces within half a metre of the lot's floor height.
+                    owned[i][0].append(p[face]); owned[i][1].append(m)
+    drawables = []
+    for i, (asset, meshes) in enumerate(parts):
+        name = f'sk8v_{key}_{i}'
+        tris, mats = np.array(owned[i][0]).reshape(-1, 3, 3), owned[i][1]
+        root, used, polys = drawable(name, meshes, textures, template, flat, spec, tris, mats)
+        drawables.append(dict(name=name, root=root, used=used, asset=asset, meshes=len(meshes), tris=tris, mats=mats,
+                              triangles=int(sum(len(m[1]) for m in meshes)), collision_polygons=polys))
+    alltris = np.concatenate([d['tris'] for d in drawables if len(d['tris'])])
+    # Spawn: the floor point (upward faces at the floor's height) nearest the lot's centre.
     up = []
-    for t in tris:
+    for t in alltris:
         n = np.cross(t[1] - t[0], t[2] - t[0]); length = np.linalg.norm(n)
         if length > 1e-6 and n[2] / length > .95 and abs(t[:, 2].mean()) < .5:
             up.append(t)
@@ -365,91 +373,25 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
     size = hi - lo
     # The exit stands 3 m from the spawn, towards the lot's longer axis.
     exit_point = spawn + ([3, 0, 0] if size[0] >= size[1] else [0, 3, 0])
-    entities = [(d['name'], origin) for d in drawables]
-    span_lo, span_hi = origin + (lo + shift), origin + (hi + shift)
-    map_root = ymap(f'sk8v_{key}', entities, span_lo, span_hi)
-    write(map_root, lot_work / f'sk8v_{key}.ymap.xml')
     return dict(key=key, name=label, district=district, origin=origin.round(3).tolist(),
                 spawn=spawn.round(3).tolist(), heading=0.0, exit=exit_point.round(3).tolist(),
-                size=size.round(2).tolist(), collision=source, collision_polygons=polys,
-                drawables=drawables, work=lot_work)
+                size=size.round(2).tolist(), collision=source, drawables=drawables)
 
 
-def store_binaries(path):
-    """Marks an OPEN RPF7's plain (non-resource) files as stored.
-
-    `rage create` copies plain files raw but writes their on-disk size as their
-    full size, which GTA reads as "deflated, this long": it then fails to
-    inflate them (ERR_FIL_PACK_3 "Corrupt game data", 2026-10-15). Stored
-    files carry on-disk size 0, as live_clip's pack and Rockstar's nested
-    archives do. Resources (their own deflate stream and page flags) are left
-    as they are."""
-    data = bytearray(Path(path).read_bytes())
-    magic, count, names, encryption = struct.unpack_from('<4I', data, 0)
-    if magic != 0x52504637 or encryption != 0x4E45504F:
-        raise ValueError(f'{path}: not an OPEN RPF7 archive')
-    patched = 0
-    for i in range(count):
-        at = 16 + 16 * i
-        if struct.unpack_from('<I', data, at + 4)[0] == 0x7FFFFF00:
-            continue  # a directory
-        if data[at + 7] & 0x80:
-            continue  # a resource
-        on_disk = int.from_bytes(data[at + 2:at + 5], 'little')
-        size = struct.unpack_from('<I', data, at + 8)[0]
-        if on_disk and on_disk == size:
-            data[at + 2:at + 5] = b'\0\0\0'
-            patched += 1
-        elif on_disk:
-            raise ValueError(f'{path}: entry {i} is really compressed ({on_disk} of {size} bytes)')
-    Path(path).write_bytes(bytes(data))
-    return patched
-
-
-def pack_with_map(rage, pack, map_rpf, work, out, ityp_request=False):
-    """SK8V's pack plus the map, enabled at startup in its one change set
-    (`ityp_request`: also a DLC_ITYP_REQUEST for the lots' types). Off by default:
-    bisected in game 2026-10-15, that request crashes Story Mode while loading;
-    the map rpf alone mounts fine."""
-    tree = work / 'pack'
-    shutil.rmtree(tree, ignore_errors=True)
-    run_rage(rage, 'extract', pack, '-o', tree)
-    levels = tree / 'x64/levels/gta5'; levels.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(map_rpf, levels / RPF)
-    content = tree / 'content.xml'
-    text = content.read_text(encoding='utf-8')
-    if RPF in text:
-        raise ValueError('the pack already lists the park map')
-    path = f'dlc_skatev:/%PLATFORM%/levels/gta5/{RPF}'
-    item = (f'    <Item>\n      <filename>{path}</filename>\n      <fileType>RPF_FILE</fileType>\n'
-            '      <overlay value="false" />\n      <disabled value="true" />\n      <persistent value="true" />\n'
-            '      <contents>CONTENTS_MAP</contents>\n    </Item>\n')
-    enable = f'        <Item>{path}</Item>\n'
-    if ityp_request:
-        item += (f'    <Item>\n      <filename>{path}/{YTYP}.ytyp</filename>\n      <fileType>DLC_ITYP_REQUEST</fileType>\n'
-                 '      <overlay value="false" />\n      <disabled value="true" />\n      <persistent value="true" />\n    </Item>\n')
-        enable += f'        <Item>{path}/{YTYP}.ytyp</Item>\n'
-    if text.count('</dataFiles>') != 1 or text.count('</filesToEnable>') != 1:
-        raise ValueError('unexpected content.xml layout')
-    text = text.replace('  </dataFiles>', item + '  </dataFiles>')
-    text = text.replace('      </filesToEnable>', enable + '      </filesToEnable>')
-    content.write_text(text, encoding='utf-8')
-    run_rage(rage, 'create', tree, '-o', out, '-e', 'open')
-    store_binaries(out)
-
-
-def export(skate, reference, rage, pack, out, data):
-    out.parent.mkdir(parents=True, exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix='sk8v-parks-', dir=out.parent))
+def export(skate, reference, rage, data, world):
+    data.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix='sk8v-parks-', dir=data.parent))
     try:
-        shutil.rmtree(out, ignore_errors=True); out.mkdir(parents=True)
-        map_tree = work / 'map'; map_tree.mkdir()
+        for old in data.glob('sk8v_*'):
+            old.unlink()
         reference_xml = work / 'shader-reference.ydr.xml'
         run_rage(rage, 'resource', 'dump', reference, '-o', reference_xml)
         template = next(s for s in ET.parse(reference_xml).findall('./ShaderGroup/Shaders/Item')
                         if {'DiffuseSampler', 'BumpSampler', 'SpecSampler'} <= {p.get('name') for p in s.findall('./Parameters/Item')})
+        if template.findtext('FileName') not in ('normal_spec.sps', f'hash_{joaat("normal_spec.sps"):08X}'):
+            raise ValueError(f'shader reference is {template.findtext("FileName")}, expected normal_spec.sps')
         textures = work / 'textures'; textures.mkdir()
-        lots = [lot(*spec, skate, work, template, textures, rage) for spec in LOTS]
+        lots = [lot(*spec, skate, work, template, textures) for spec in LOTS]
         pngs = sorted(textures.glob('*.png'))
         run_rage(rage, 'textures', 'encode', *[p for p in pngs if p.stem.endswith('_nm')], '-o', textures, '-f', 'bc1')
         run_rage(rage, 'textures', 'encode', *[p for p in pngs if not p.stem.endswith('_nm')], '-o', textures)
@@ -460,48 +402,55 @@ def export(skate, reference, rage, pack, out, data):
                 for texture in d['used']:
                     shutil.copyfile(textures / f'{texture}.dds', folder / f'{texture}.dds')
                 xml = folder / f'{d["name"]}.ydr.xml'; write(d['root'], xml)
-                ydr = map_tree / f'{d["name"]}.ydr'
+                ydr = data / f'{d["name"]}.ydr'
                 run_rage(rage, 'resource', 'build', xml, '-o', ydr, '--strict')
+                back = folder / 'roundtrip.xml'
+                run_rage(rage, 'resource', 'dump', ydr, '-o', back)
+                polys = ET.parse(back).findall('./Bounds/Children/Item/Polygons/*')
+                if len(polys) != d['collision_polygons']:
+                    raise ValueError(f'{d["name"]}: bound has {len(polys)} polygons, expected {d["collision_polygons"]}')
+                d['ydr_sha256'] = sha256_file(ydr)
                 ydrs.append(ydr)
-            run_rage(rage, 'resource', 'build', item['work'] / f'sk8v_{item["key"]}.ybn.xml',
-                     '-o', map_tree / f'sk8v_{item["key"]}.ybn')
-            run_rage(rage, 'resource', 'build', item['work'] / f'sk8v_{item["key"]}.ymap.xml',
-                     '-o', map_tree / f'sk8v_{item["key"]}.ymap')
-        run_rage(rage, 'ytyp', 'from-drawables', *ydrs, '-o', map_tree / f'{YTYP}.ytyp',
-                 '--flags', 0, '--lod-dist', LOD_DISTANCE, '--hd-dist', LOD_DISTANCE)
-        run_rage(rage, 'resource', 'recalc', map_tree)
-        run_rage(rage, 'manifest', 'generate', map_tree, '-o', map_tree / '_manifest.ymf')
-        # Every bound came back with its polygons (rage round trip).
+        ytyp = data / f'{YTYP}.ytyp'
+        run_rage(rage, 'ytyp', 'from-drawables', *ydrs, '-o', ytyp, '--flags', ARCHETYPE_FLAGS,
+                 '--lod-dist', LOD_DISTANCE, '--hd-dist', LOD_DISTANCE)
+        dumped = work / 'ytyp.xml'; run_rage(rage, 'resource', 'dump', ytyp, '-o', dumped)
+        archetypes = {a.findtext('name'): a for a in ET.parse(dumped).findall('./archetypes/Item')}
         for item in lots:
-            back = work / f'{item["key"]}.ybn.roundtrip.xml'
-            run_rage(rage, 'resource', 'dump', map_tree / f'sk8v_{item["key"]}.ybn', '-o', back)
-            polys = ET.parse(back).findall('.//Polygons/*')
-            if len(polys) != item['collision_polygons']:
-                raise ValueError(f'{item["key"]}: bound has {len(polys)} polygons, expected {item["collision_polygons"]}')
-        map_rpf = out / RPF
-        run_rage(rage, 'create', map_tree, '-o', map_rpf, '-e', 'open')
-        store_binaries(map_rpf)
-        pack_with_map(rage, pack, map_rpf, work, out / 'dlc.rpf')
-        data.mkdir(parents=True, exist_ok=True)
-        parks = {'format': 'sk8v-parks-1', 'lots': [{k: v for k, v in i.items() if k not in ('drawables', 'work')} for i in lots]}
-        (data / 'parks.json').write_text(json.dumps(parks, indent=2), encoding='utf-8')
-        # The host's copy, one lot a line: key, name, spawn xyz, heading, exit xyz, origin xyz, reach (m)
-        rows = ['# SK8V park lots v1: key\tname\tspawn\theading\texit\torigin\treach']
+            for d in item['drawables']:
+                a = archetypes.get(d['name'])
+                if a is None or int(a.find('flags').get('value')) != ARCHETYPE_FLAGS:
+                    raise ValueError(f'{d["name"]}: archetype missing or with the wrong flags')
+                if d['collision_polygons'] and a.findtext('physicsDictionary') != d['name']:
+                    raise ValueError(f'{d["name"]}: archetype without its embedded bound')
+        # Skate's exact templates beside the world cache, and the index the host reads.
+        templates = world.with_suffix('.prop-models')
+        templates.mkdir(parents=True, exist_ok=True)
+        hashes = []
+        for item in lots:
+            for d in item['drawables']:
+                if len(d['tris']):
+                    write_svwc(templates / f'{joaat(d["name"]):08x}.svwc', d['tris'], d['mats'])
+                    hashes.append(joaat(d['name']))
+        dropper.update_index(world, hashes)
+        public = lambda i: {k: v for k, v in i.items() if k != 'drawables'} | {
+            'pieces': [{k: v for k, v in d.items() if k not in ('root', 'used', 'tris', 'mats')} for d in i['drawables']]}
+        (data / 'parks.json').write_text(json.dumps({'format': 'sk8v-parks-2', 'lots': [public(i) for i in lots]}, indent=2),
+                                         encoding='utf-8')
+        # The host's copy, one lot a line: key, name, spawn xyz, heading, exit xyz, origin xyz, reach (m), pieces
+        rows = ['# SK8V park lots v2: key\tname\tspawn\theading\texit\torigin\treach\tpieces']
         xyz = lambda v: ' '.join(f'{c:.3f}' for c in v)
         for i in lots:
             reach = float(np.hypot(*i['size'][:2]) / 2 + 20)
             rows.append('\t'.join([i['key'], i['name'], xyz(i['spawn']), f"{i['heading']:.1f}", xyz(i['exit']),
-                                   xyz(i['origin']), f'{reach:.1f}']))
+                                   xyz(i['origin']), f'{reach:.1f}', ','.join(d['name'] for d in i['drawables'])]))
         (data / 'parks.txt').write_text('\n'.join(rows) + '\n', encoding='utf-8')
         receipt = {'shader_reference_sha256': sha256_file(reference), 'rage_binary_sha256': sha256_file(rage),
-                   'pack_source_sha256': sha256_file(pack), 'pack_sha256': sha256_file(out / 'dlc.rpf'),
-                   'map_sha256': sha256_file(map_rpf),
-                   'lots': [{k: v for k, v in i.items() if k not in ('drawables', 'work')} |
-                            {'drawables': [{k: v for k, v in d.items() if k not in ('root', 'used')} for d in i['drawables']]}
-                            for i in lots]}
+                   'ytyp': ytyp.name, 'ytyp_sha256': sha256_file(ytyp), 'archetype_flags': ARCHETYPE_FLAGS,
+                   'templates': [f'{h:08x}' for h in hashes], 'lots': [public(i) for i in lots]}
         (data / 'receipt.json').write_text(json.dumps(receipt, indent=2), encoding='utf-8')
-        print(json.dumps({'map': str(map_rpf), 'pack': str(out / 'dlc.rpf'), 'parks': str(data / 'parks.json'),
-                          'lots': [(i['name'], i['spawn']) for i in lots]}, indent=2))
+        print(json.dumps({'data': str(data), 'templates': len(hashes),
+                          'lots': [(i['name'], i['spawn'], len(i['drawables'])) for i in lots]}, indent=2))
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -511,11 +460,10 @@ if __name__ == '__main__':
     p.add_argument('--skate', type=Path, required=True, help='Skate 3 disc image or its extracted folder')
     p.add_argument('--shader-reference', type=Path, required=True, help='owned GTA .ydr with a normal_spec shader')
     p.add_argument('--rage', type=Path, default=REPO / 'build/tools/rage.exe')
-    p.add_argument('--pack', type=Path, required=True, help="live_clip's dlc.rpf")
-    p.add_argument('--out', type=Path, required=True, help='folder for the map and the combined pack')
-    p.add_argument('--data', type=Path, required=True, help='<assets>/private/parks: parks.json for the host')
+    p.add_argument('--data', type=Path, required=True, help='<assets>/private/parks: the lots and parks.txt for the host')
+    p.add_argument('--world', type=Path, required=True, help='the world cache (sk8v.svwc); templates go beside it')
     p.add_argument('--no-pins', action='store_true', help='skip the donor pin check (development)')
     a = p.parse_args()
     if not a.no_pins:
         verify_pins()
-    export(a.skate, a.shader_reference, a.rage, a.pack, a.out.resolve(), a.data.resolve())
+    export(a.skate, a.shader_reference, a.rage, a.data.resolve(), a.world.resolve())

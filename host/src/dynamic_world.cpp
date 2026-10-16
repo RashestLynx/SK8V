@@ -218,10 +218,12 @@ void DynamicWorld::Gather(int self, SvVec3 center, float radius, int presentatio
     collect(worldGetAllVehicles, EntityKind::Vehicle, r2);
     collect(worldGetAllPeds, EntityKind::Ped, r2 * 0.5f);
     collect(worldGetAllObjects, EntityKind::Object, r2 * 0.5f);
+    // Placed objects (dropped, a skate.Park lot's pieces) are few and frozen: always gathered,
+    // first, whatever `center` says (on the frame the board comes out it is still the last
+    // board position, maybe kilometres off: the lot left Skate's static area, 2026-10-15).
     for (const int e : placed_) {
         if (!Call<BOOL>(gta::DOES_ENTITY_EXIST, e)) continue;
-        const float d2 = Dist2(Position(e, positionCheck_, positionLog_), center);
-        if (d2 <= kPlacedRadius * kPlacedRadius) nearby.push_back({d2, e, EntityKind::Object});
+        nearby.push_back({0.0f, e, EntityKind::Object});
     }
     std::sort(nearby.begin(), nearby.end(), [](const Candidate& a, const Candidate& b) { return a.d2 < b.d2; });
     for (const Candidate& c : nearby) {

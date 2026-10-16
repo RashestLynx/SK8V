@@ -2094,7 +2094,12 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     if (gather) s.dynamicDue = (std::min)(s.dynamicDue - kStep, kStep);
     // Object Dropper: a picked object spawns once its model is in.
     dropper::Tick(s.last.skater_position, s.facing);
-    s.world.SetPlaced(dropper::Objects());
+    {
+        // Dropped objects and the skate.Park lot's pieces: both built into Skate's static area.
+        std::vector<int> placed = dropper::Objects();
+        placed.insert(placed.end(), parklot::Objects().begin(), parklot::Objects().end());
+        s.world.SetPlaced(placed);
+    }
     if (cfg.dynamicWorld && gather) {
         // Moving GTA entities near the skater, for Skate's contact code.
         s.world.SetPedParts(cfg.pedHitboxes);
@@ -2997,6 +3002,22 @@ void ScriptMain() {
         }
         menu::Tick();
         parklot::Tick(SkateOwnsPlayer(s), menu::IsOpen() || dropper::IsOpen());
+        // A skate.Park lot's pieces reach the runtime on foot too, twice a second, so its
+        // static area already holds them when the board comes out (sent first as moving
+        // bodies around a standing skater, a whole building knocked them over, 2026-10-15).
+        if (s.state != LifeState::Skating && !parklot::Objects().empty() && g_runtime.IsLoaded()) {
+            static DWORD nextLot = 0;
+            if (static_cast<int>(GetTickCount() - nextLot) >= 0) {
+                nextLot = GetTickCount() + 500;
+                std::vector<int> placed = dropper::Objects();
+                placed.insert(placed.end(), parklot::Objects().begin(), parklot::Objects().end());
+                s.world.SetPlaced(placed);
+                const Vector3 at = Call<Vector3>(gta::GET_ENTITY_COORDS, Call<Ped>(gta::PLAYER_PED_ID), 1);
+                s.world.Gather(Call<Ped>(gta::PLAYER_PED_ID), SvVec3{at.x, at.y, at.z}, cfg.dynamicRadius, boardnative::Entity());
+                const auto& bodies = s.world.Bodies();
+                g_runtime.SetDynamicBodies(bodies.data(), static_cast<std::uint32_t>(bodies.size()));
+            }
+        }
         Lap(kPartMenu);
         recordsui::Tick(s.state == LifeState::Skating,
                         g_hallOfMeatOn && std::string_view(s.last.state_utf8).rfind("Wipeout", 0) == 0);
