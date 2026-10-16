@@ -320,37 +320,58 @@ def surface_points(t, step):
     return t[0] + np.outer(a[keep] / n, e1) + np.outer(b[keep] / n, e2)
 
 
-def drop_hidden(tris, render, reach=1.0, rise=.1):
-    """Skate 3's Team HQ grows as the player's team does, and its collision holds every
-    stage: 5-15 m walls across the hall (one beside the spawn), a 20 cm slab under it,
-    and floor and roof outside the building, none of them in the stage we draw (the
-    player's invisible walls, 2026-10-16). A collision face is kept when at least a
-    third of it lies near visible faces of its kind: a wall within `reach` of a visible
-    wall, a floor (or roof, or ramp) within `reach` across and `rise` up or down of a
-    visible one. (A wall near only the floor is not seen.)"""
-    def steep(t):
-        n = np.cross(t[1] - t[0], t[2] - t[0]); length = np.linalg.norm(n)
-        return length < 1e-12 or abs(n[2]) / length < .5
+def steep(t):
+    """A wall (more than 60 degrees from flat), as opposed to a floor, ramp or roof."""
+    n = np.cross(t[1] - t[0], t[2] - t[0]); length = np.linalg.norm(n)
+    return length < 1e-12 or abs(n[2]) / length < .5
+
+
+def near_kind(faces, reference, reach=1.0, rise=.1):
+    """Per face: does at least a third of it lie near `reference` faces of its kind?
+    A wall within `reach` of a wall; a floor (or roof, or ramp) within `reach` across
+    and about `rise` up or down of a floor. (A wall near only the floor is not near.)"""
     cells = {True: np.array([reach / 2] * 3), False: np.array([reach / 2, reach / 2, rise / 2])}
     seen = {True: set(), False: set()}
-    for r in render:
+    for r in reference:
         kind = steep(r)
         for q in np.floor(surface_points(r, .25) / cells[kind]).astype(np.int64):
             seen[kind].add((int(q[0]), int(q[1]), int(q[2])))
     span = range(-2, 3)
     rises = {True: span, False: range(-1, 2)}  # a floor: within 5-10 cm up or down
-    out, dropped = [], 0
-    for t3 in tris:
+    out = []
+    for t3 in faces:
         kind = steep(t3)
         near_cells = seen[kind]
         pts = np.floor(surface_points(t3, reach / 2) / cells[kind]).astype(np.int64)
         near = sum(any((int(x) + dx, int(y) + dy, int(z) + dz) in near_cells for dx in span for dy in span for dz in rises[kind])
                    for x, y, z in pts)
-        if near * 3 >= len(pts):
-            out.append(t3)
-        else:
-            dropped += 1
-    return out, dropped
+        out.append(near * 3 >= len(pts))
+    return out
+
+
+def drop_hidden(tris, render):
+    """Skate 3's Team HQ grows as the player's team does, and its collision holds every
+    stage: 5-15 m walls across the hall (one beside the spawn), a 20 cm slab under it,
+    and floor and roof outside the building, none of them in the stage we draw (the
+    player's invisible walls, 2026-10-16). A collision face is kept when it lies near
+    visible faces of its kind (near_kind)."""
+    keep = near_kind(tris, render)
+    return [t3 for t3, k in zip(tris, keep) if k], keep.count(False)
+
+
+def add_visible(tris, render, top):
+    """The other way round: most of Team HQ's east wall is drawn but has no collision in
+    Skate 3 (a ped walked out through it, 2026-10-16), and some floor has none either.
+    A visible face up to `top` with no collision of its kind near it collides as drawn;
+    a wall both ways (GTA's collision is one-sided)."""
+    low = [r for r in render if r[:, 2].min() < top]
+    missing = [r for r, k in zip(low, near_kind(low, tris)) if not k]
+    added = []
+    for r in missing:
+        added.append(r)
+        if steep(r):
+            added.append(r[[0, 2, 1]])
+    return tris + added, len(missing)
 
 
 def face_up(tris, top, cell=2.0):
@@ -454,8 +475,11 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
                     for asset in sim for mesh in decode_rx2_clustered_meshes(asset.data) for tri in mesh.triangles]
         lot_tris, flipped = face_up(lot_tris, floor_height(lot_tris) + 20.0)
         print(f'{label}: {flipped} downward-only floor faces turned up', flush=True)
-        lot_tris, hidden = drop_hidden(lot_tris, [p[face] for _, meshes in parts for p, faces, *_ in meshes for face in faces])
+        render_tris = [p[face] for _, meshes in parts for p, faces, *_ in meshes for face in faces]
+        lot_tris, hidden = drop_hidden(lot_tris, render_tris)
         print(f'{label}: {hidden} collision faces with nothing visible there dropped', flush=True)
+        lot_tris, shown = add_visible(lot_tris, render_tris, floor_height(lot_tris) + 20.0)
+        print(f'{label}: {shown} visible faces with no collision there made to collide', flush=True)
         for t3 in lot_tris:
             c = t3.mean(axis=0)[:2]
             inside = [i for i, (a, b) in enumerate(boxes) if (c >= a).all() and (c <= b).all()]
