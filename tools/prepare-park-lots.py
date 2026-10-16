@@ -311,6 +311,39 @@ def write(root, path):
     ET.indent(root); ET.ElementTree(root).write(path, encoding='utf-8', xml_declaration=True)
 
 
+def surface_points(t, step):
+    """Points over a triangle about `step` apart (its corners included)."""
+    e1, e2 = t[1] - t[0], t[2] - t[0]
+    n = int(max(np.linalg.norm(e1), np.linalg.norm(e2), np.linalg.norm(t[2] - t[1])) / step) + 1
+    a, b = np.meshgrid(np.arange(n + 1), np.arange(n + 1))
+    keep = a + b <= n
+    return t[0] + np.outer(a[keep] / n, e1) + np.outer(b[keep] / n, e2)
+
+
+def drop_hidden(tris, render, reach=1.0):
+    """Skate 3's Team HQ grows as the player's team does, and its collision holds the
+    walls of every stage: 10-15 m slabs across the hall, one beside the spawn, that
+    the stage we draw does not have (the player's invisible walls, 2026-10-16). A
+    collision face less than a third of which lies within `reach` of any visible
+    face is dropped."""
+    cell = reach / 2
+    seen = set()
+    for r in render:
+        for q in np.floor(surface_points(r, cell) / cell).astype(np.int64):
+            seen.add((int(q[0]), int(q[1]), int(q[2])))
+    span = range(-2, 3)
+    out, dropped = [], 0
+    for t3 in tris:
+        pts = np.floor(surface_points(t3, reach / 2) / cell).astype(np.int64)
+        near = sum(any((int(x) + dx, int(y) + dy, int(z) + dz) in seen for dx in span for dy in span for dz in span)
+                   for x, y, z in pts)
+        if near * 3 >= len(pts):
+            out.append(t3)
+        else:
+            dropped += 1
+    return out, dropped
+
+
 def face_up(tris, top, cell=2.0):
     """Skate 3's collision for a lot is two-sided where it matters: about 1,500 m2 of
     Team HQ's floor exists only as downward faces, which GTA and SK8V's runtime (one-
@@ -412,6 +445,8 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
                     for asset in sim for mesh in decode_rx2_clustered_meshes(asset.data) for tri in mesh.triangles]
         lot_tris, flipped = face_up(lot_tris, floor_height(lot_tris) + 20.0)
         print(f'{label}: {flipped} downward-only floor faces turned up', flush=True)
+        lot_tris, hidden = drop_hidden(lot_tris, [p[face] for _, meshes in parts for p, faces, *_ in meshes for face in faces])
+        print(f'{label}: {hidden} collision faces with nothing visible there dropped', flush=True)
         for t3 in lot_tris:
             c = t3.mean(axis=0)[:2]
             inside = [i for i, (a, b) in enumerate(boxes) if (c >= a).all() and (c <= b).all()]
