@@ -49,3 +49,7 @@ Thumbs.db
 
 # Python bytecode
 __pycache__/
+
+# local build output and fetch receipts
+receipts/
+rust/target-msvc/
