@@ -452,7 +452,19 @@ XInputGetStateFn PadGetState() {
     return fn;
 }
 
+// Dev: a scripted controller (dev command 'pad'), used instead of the real pad until
+// g_padUntil, so an unattended test can ride (no virtual gamepad driver needed).
+SvPad g_padScript{};
+DWORD g_padUntil = 0;
+
 SvPad ReadPadRaw() {
+    if (g_padUntil && static_cast<int>(GetTickCount() - g_padUntil) < 0) {
+        SvPad pad = g_padScript;
+        pad.connected = 1;
+        static std::uint32_t s_packet = 0;
+        pad.packet = ++s_packet;
+        return pad;
+    }
     // Polled every frame in and out of skate mode (board action). XInput is
     // slow on empty slots, so connected slots are read each frame and the
     // others are scanned at most once a second. The pad used is the one that
@@ -2787,6 +2799,28 @@ void DevCommand(Session& s) {
         const Hash h = util::Joaat(what);
         Logf("SkateV dev: model %s %08x in cd image %d, valid %d", what.c_str(), h, Call<BOOL>(gta::IS_MODEL_IN_CDIMAGE, h) ? 1 : 0,
              Call<BOOL>(gta::IS_MODEL_VALID, h) ? 1 : 0);
+    } else if (verb == "pad") {
+        // pad <buttons hex> <left x> <left y> <right trigger> <ms>: that pad state for ms.
+        std::string buttons;
+        int lx = 0, ly = 0, rt = 0, ms = 0;
+        if (words >> buttons >> lx >> ly >> rt >> ms) {
+            g_padScript = SvPad{};
+            g_padScript.buttons = static_cast<std::uint16_t>(std::strtoul(buttons.c_str(), nullptr, 16));
+            g_padScript.left_x = static_cast<std::int16_t>(std::clamp(lx, -32767, 32767));
+            g_padScript.left_y = static_cast<std::int16_t>(std::clamp(ly, -32767, 32767));
+            g_padScript.right_trigger = static_cast<std::uint8_t>(std::clamp(rt, 0, 255));
+            g_padUntil = GetTickCount() + static_cast<DWORD>(std::clamp(ms, 0, 60000));
+            if (!g_padUntil) g_padUntil = 1;
+        }
+    } else if (verb == "walk") {
+        // walk <dx> <dy>: the ped walks straight that far (GTA's own task: does anything stop it?).
+        float dx = 0, dy = 0;
+        if (words >> dx >> dy) {
+            const Vector3 p = Call<Vector3>(gta::GET_ENTITY_COORDS, ped, 1);
+            Call<void>(gta::CLEAR_PED_TASKS, ped);
+            Call<void>(gta::TASK_GO_STRAIGHT_TO_COORD, ped, p.x + dx, p.y + dy, p.z, 1.0f, 15000, 40000.0f, 0.0f);
+            Logf("SkateV dev: walking from (%.2f, %.2f) to (%.2f, %.2f)", p.x, p.y, p.x + dx, p.y + dy);
+        }
     } else if (verb == "probe") {
         // probe x0 y0 x1 y1 n z: GTA's ground (GET_GROUND_Z from z down) at n points along a line.
         float x0 = 0, y0 = 0, x1 = 0, y1 = 0, z = 0;
