@@ -311,6 +311,58 @@ def write(root, path):
     ET.indent(root); ET.ElementTree(root).write(path, encoding='utf-8', xml_declaration=True)
 
 
+def face_up(tris, top, cell=2.0):
+    """Skate 3's collision for a lot is two-sided where it matters: about 1,500 m2 of
+    Team HQ's floor exists only as downward faces, which GTA and SK8V's runtime (one-
+    sided) fall straight through (2026-10-16). A floor or ramp face (more than 60
+    degrees from vertical) that faces down with no upward face under its centre at
+    the same height is turned over, up to `top` (the floor + 20 m: Team HQ's upper
+    level; roof undersides stay ceilings). Walls are left as they are."""
+    def normal(t):
+        n = np.cross(t[1] - t[0], t[2] - t[0]); length = np.linalg.norm(n)
+        return n / length if length > 1e-12 else None
+    def height(t, x, y):
+        p = t[:, :2]
+        d = (p[1, 1] - p[2, 1]) * (p[0, 0] - p[2, 0]) + (p[2, 0] - p[1, 0]) * (p[0, 1] - p[2, 1])
+        if abs(d) < 1e-12:
+            return None
+        l1 = ((p[1, 1] - p[2, 1]) * (x - p[2, 0]) + (p[2, 0] - p[1, 0]) * (y - p[2, 1])) / d
+        l2 = ((p[2, 1] - p[0, 1]) * (x - p[2, 0]) + (p[0, 0] - p[2, 0]) * (y - p[2, 1])) / d
+        if min(l1, l2, 1 - l1 - l2) < -1e-6:
+            return None
+        return l1 * t[0, 2] + l2 * t[1, 2] + (1 - l1 - l2) * t[2, 2]
+    normals = [normal(t) for t in tris]
+    grid = {}
+    for i, (t, n) in enumerate(zip(tris, normals)):
+        if n is None or n[2] <= .5:
+            continue
+        lo = np.floor(t[:, :2].min(axis=0) / cell).astype(int); hi = np.floor(t[:, :2].max(axis=0) / cell).astype(int)
+        for gx in range(lo[0], hi[0] + 1):
+            for gy in range(lo[1], hi[1] + 1):
+                grid.setdefault((gx, gy), []).append(i)
+    out, flipped = [], 0
+    for t, n in zip(tris, normals):
+        if n is not None and n[2] < -.5 and t[:, 2].mean() <= top:
+            # The centre and three points toward the corners must all lie on an upward face.
+            centre = t.mean(axis=0)
+            covered = True
+            for x, y, z in [centre] + [.6 * centre + .4 * v for v in t]:
+                hit = False
+                for i in grid.get((int(np.floor(x / cell)), int(np.floor(y / cell))), ()):
+                    h = height(tris[i], x, y)
+                    if h is not None and abs(h - z) < .05:
+                        hit = True
+                        break
+                if not hit:
+                    covered = False
+                    break
+            if not covered:
+                t = t[[0, 2, 1]]
+                flipped += 1
+        out.append(t)
+    return out, flipped
+
+
 def floor_height(tris):
     """The lot's floor: the height (1 cm bins) of the most upward-facing area within
     0.6 m of its lowest point (Team HQ's collision floor is at +0.12, Hartley
@@ -356,17 +408,18 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
         for _, meshes in parts:
             pts = np.concatenate([m[0] for m in meshes])
             boxes.append((pts.min(axis=0)[:2] - 1, pts.max(axis=0)[:2] + 1))
-        for asset in sim:
-            for mesh in decode_rx2_clustered_meshes(asset.data):
-                for tri in mesh.triangles:
-                    t3 = np.array([tri.a, tri.b, tri.c], np.float64) @ C.T + shift
-                    c = t3.mean(axis=0)[:2]
-                    inside = [i for i, (a, b) in enumerate(boxes) if (c >= a).all() and (c <= b).all()]
-                    if inside:
-                        i = min(inside, key=lambda i: np.prod(boxes[i][1] - boxes[i][0]))
-                    else:
-                        i = min(range(len(boxes)), key=lambda i: np.sum(((boxes[i][0] + boxes[i][1]) / 2 - c) ** 2))
-                    owned[i][0].append(t3); owned[i][1].append(CONCRETE)
+        lot_tris = [np.array([tri.a, tri.b, tri.c], np.float64) @ C.T + shift
+                    for asset in sim for mesh in decode_rx2_clustered_meshes(asset.data) for tri in mesh.triangles]
+        lot_tris, flipped = face_up(lot_tris, floor_height(lot_tris) + 20.0)
+        print(f'{label}: {flipped} downward-only floor faces turned up', flush=True)
+        for t3 in lot_tris:
+            c = t3.mean(axis=0)[:2]
+            inside = [i for i, (a, b) in enumerate(boxes) if (c >= a).all() and (c <= b).all()]
+            if inside:
+                i = min(inside, key=lambda i: np.prod(boxes[i][1] - boxes[i][0]))
+            else:
+                i = min(range(len(boxes)), key=lambda i: np.sum(((boxes[i][0] + boxes[i][1]) / 2 - c) ** 2))
+            owned[i][0].append(t3); owned[i][1].append(CONCRETE)
     else:
         # The visible geometry collides. Its floor is not one level: along the model tiles'
         # seams some vertices sit 21 cm low, a ledge across Hartley Stadium's floor that threw

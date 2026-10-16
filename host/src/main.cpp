@@ -2787,6 +2787,23 @@ void DevCommand(Session& s) {
         const Hash h = util::Joaat(what);
         Logf("SkateV dev: model %s %08x in cd image %d, valid %d", what.c_str(), h, Call<BOOL>(gta::IS_MODEL_IN_CDIMAGE, h) ? 1 : 0,
              Call<BOOL>(gta::IS_MODEL_VALID, h) ? 1 : 0);
+    } else if (verb == "probe") {
+        // probe x0 y0 x1 y1 n z: GTA's ground (GET_GROUND_Z from z down) at n points along a line.
+        float x0 = 0, y0 = 0, x1 = 0, y1 = 0, z = 0;
+        int n = 0;
+        if (words >> x0 >> y0 >> x1 >> y1 >> n >> z && n > 1 && n <= 200) {
+            std::string row;
+            for (int i = 0; i < n; ++i) {
+                const float t = static_cast<float>(i) / static_cast<float>(n - 1);
+                const float x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t;
+                Call<void>(gta::REQUEST_COLLISION_AT_COORD, x, y, z);
+                float ground = 0.0f;
+                char cell[32];
+                std::snprintf(cell, sizeof(cell), Call<BOOL>(gta::GET_GROUND_Z_FOR_3D_COORD, x, y, z, &ground, 0, 0) ? " %.2f" : " -", ground);
+                row += cell;
+            }
+            Logf("SkateV dev: probe (%.1f, %.1f)->(%.1f, %.1f) from z %.1f:%s", x0, y0, x1, y1, z, row.c_str());
+        }
     } else if (verb == "itype" && (words >> what)) {
         // Loads a registered .ytyp by name, as the dropper loads its own (streaming.h).
         if (streaming::Ready() && streaming::Guards()) {
