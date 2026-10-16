@@ -167,6 +167,10 @@ def models(assets):
         for mesh in parsed.meshes:
             if mesh.uvs is None or not len(mesh.faces):
                 continue
+            # Skate 3's light effects (fx_*: projected light colours) drawn as walls are
+            # stripes of colour (Team HQ, 2026-10-15): left out.
+            if (mesh.material_name or '').lower().startswith('fx_'):
+                continue
             p = np.asarray(mesh.vertices, np.float64) @ C.T
             faces = np.asarray(mesh.faces, np.int64).reshape(-1, 3)
             texture = re.search(r'(0x[0-9A-Fa-f]{16})$', mesh.material_name or '')
@@ -350,11 +354,17 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
                         i = min(range(len(boxes)), key=lambda i: np.sum(((boxes[i][0] + boxes[i][1]) / 2 - c) ** 2))
                     owned[i][0].append(t3); owned[i][1].append(CONCRETE)
     else:
+        # The visible geometry collides. Its floor is not one level: along the model tiles'
+        # seams some vertices sit 21 cm low, a ledge across Hartley Stadium's floor that threw
+        # the board around (2026-10-15). Whatever lies within half a metre of the floor is
+        # flattened onto it.
         for i, (_, meshes) in enumerate(parts):
             for p, faces, _, material, _ in meshes:
                 m = surface(material)
+                q = p.copy()
+                q[np.abs(q[:, 2]) < .5, 2] = 0.0
                 for face in faces:
-                    owned[i][0].append(p[face]); owned[i][1].append(m)
+                    owned[i][0].append(q[face]); owned[i][1].append(m)
     drawables = []
     for i, (asset, meshes) in enumerate(parts):
         name = f'sk8v_{key}_{i}'
