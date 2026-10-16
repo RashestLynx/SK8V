@@ -2817,12 +2817,14 @@ void DevCommand(Session& s) {
             if (!g_padUntil) g_padUntil = 1;
         }
     } else if (verb == "walk") {
-        // walk <dx> <dy>: the ped walks straight that far (GTA's own task: does anything stop it?).
-        float dx = 0, dy = 0;
+        // walk <dx> <dy> [speed]: the ped walks (1), runs (2) or sprints (3) straight that far
+        // (GTA's own task: does anything stop it?).
+        float dx = 0, dy = 0, speed = 1.0f;
         if (words >> dx >> dy) {
+            if (!(words >> speed)) speed = 1.0f;
             const Vector3 p = Call<Vector3>(gta::GET_ENTITY_COORDS, ped, 1);
             Call<void>(gta::CLEAR_PED_TASKS, ped);
-            Call<void>(gta::TASK_GO_STRAIGHT_TO_COORD, ped, p.x + dx, p.y + dy, p.z, 1.0f, 15000, 40000.0f, 0.0f);
+            Call<void>(gta::TASK_GO_STRAIGHT_TO_COORD, ped, p.x + dx, p.y + dy, p.z, std::clamp(speed, 1.0f, 3.0f), 15000, 40000.0f, 0.0f);
             Logf("SkateV dev: walking from (%.2f, %.2f) to (%.2f, %.2f)", p.x, p.y, p.x + dx, p.y + dy);
         }
     } else if (verb == "probe") {
