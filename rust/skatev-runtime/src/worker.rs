@@ -56,6 +56,8 @@ pub enum Job {
     },
     Suspend,
     DynamicBodies(Vec<crate::dynamic::HostBody>),
+    /// Skate 3's Object Dropper screen (`sv_set_object_dropper`).
+    Dropper(Box<crate::hud::DropperUi>),
     /// Posed ragdoll parts of the nearby GTA peds (their hitboxes).
     PedParts(Vec<crate::ped_bodies::PedPart>),
     /// Present Skate's pose on this GTA character (None: Skate's own skater).
@@ -585,7 +587,9 @@ fn set(shared: &Mutex<Shared>, status: u32, message: impl Into<String>) {
 /// own size) of the player rebuilds the area (`live::changed_near`).
 const LIVE_NEAR: f32 = 16.0;
 
-type Built = (Vec3, Result<(PreparedCollision, usize, usize, Vec<crate::live::Seen>), String>);
+/// The built area, its triangle and rail counts, GTA's bounds it read and
+/// the dropped props (`HostBody::placed_key`) built in.
+type Built = (Vec3, Result<(PreparedCollision, usize, usize, Vec<crate::live::Seen>, Vec<u64>), String>);
 
 fn run(
     data_root: PathBuf,
@@ -685,6 +689,12 @@ fn run(
     // was read from (when GTA streams collision in or out near the skater,
     // the area is rebuilt; empty: not known, the next check rebuilds).
     let mut pending_live: Option<Option<crate::live::Level>> = None;
+    // Object Dropper props (host flag 2): the set last handed to the static
+    // world, a newer set waiting for its lock, and the set the installed
+    // area holds. A prop is dynamic geometry until an area with it is in.
+    let mut placed_sent: Vec<u64> = Vec::new();
+    let mut pending_placed: Option<(Vec<u64>, Vec<svwc::Tri>)> = None;
+    let mut installed_placed: Vec<u64> = Vec::new();
     let mut live_level: Option<crate::live::Level> = None;
     let mut installed_bounds: Arc<Vec<crate::live::Seen>> = Arc::default();
     // The check reads GTA's whole physics table (tens of thousands of
@@ -845,8 +855,9 @@ fn run(
                                 "finishing Los Santos collision here",
                             );
                             match built.recv_timeout(std::time::Duration::from_secs(60)) {
-                                Ok((centre, Ok((prepared, n, r, bounds)))) => {
+                                Ok((centre, Ok((prepared, n, r, bounds, placed)))) => {
                                     s.install_collision(prepared)?;
+                                    installed_placed = placed;
                                     built_at = centre;
                                     installed_bounds = Arc::new(bounds);
                                     life(shared, |l| {
@@ -877,6 +888,7 @@ fn run(
                                         area.tags,
                                         area.rails,
                                     )?)?;
+                                    installed_placed = area.placed;
                                     built_at = spawn;
                                     installed_bounds = Arc::new(area.bounds);
                                     life(shared, |l| {
@@ -934,11 +946,30 @@ fn run(
                         view.board_possession
                     ));
                 }
-                Job::DynamicBodies(bodies) => {
+                Job::DynamicBodies(all) => {
+                    // Dropped props already in the installed area leave the
+                    // dynamic set; the rest load their template here.
+                    let bodies: Vec<_> = all.iter()
+                        .filter(|b| !(b.placed && installed_placed.contains(&b.placed_key())))
+                        .cloned()
+                        .collect();
                     let (triangles, messages) = prop_templates.triangles(&bodies, live_level.as_ref());
                     for message in messages { log(&message); }
                     dynamic = Some(triangles);
-                    entity_proxies = prop_templates.proxies(&bodies);
+                    let mut placed: Vec<(u64, Vec<svwc::Tri>)> = all.iter()
+                        .filter(|b| b.placed)
+                        .filter_map(|b| Some((b.placed_key(), prop_templates.placed_triangles(b)?)))
+                        .collect();
+                    placed.sort_by_key(|(k, _)| *k);
+                    let keys: Vec<u64> = placed.iter().map(|(k, _)| *k).collect();
+                    if keys != placed_sent {
+                        log(&format!("object dropper: {} dropped props in the static area (rebuilding for their grind rails)", keys.len()));
+                        pending_placed = Some((keys.clone(), placed.into_iter().flat_map(|(_, t)| t).collect()));
+                        placed_sent = keys;
+                    }
+                    // Dropped props are frozen: no contact-exchange proxy.
+                    let movable: Vec<_> = bodies.iter().filter(|b| !b.placed).cloned().collect();
+                    entity_proxies = prop_templates.proxies(&movable);
                     let lines = prop_templates.grab_lines(&bodies);
                     for l in &lines {
                         let Some(b) = bodies.iter().find(|b| (b.fallback.tag | crate::dynamic::DYNAMIC_TAG) == l.tag) else { continue };
@@ -956,6 +987,7 @@ fn run(
                     grab_lines = Some(lines);
                     host_bodies = Some(entity_proxies.iter().chain(&ped_proxies).cloned().collect());
                 }
+                Job::Dropper(ui) => hud.dropper(*ui, shared, log),
                 Job::PedParts(parts) => {
                     ped_proxies = crate::ped_bodies::bodies(&parts);
                     host_bodies = Some(entity_proxies.iter().chain(&ped_proxies).cloned().collect());
@@ -1272,9 +1304,10 @@ fn run(
                             centre.x, centre.y
                         ))
                     }
-                    Ok((prepared, n, r, bounds)) => {
+                    Ok((prepared, n, r, bounds, placed)) => {
                         let t = std::time::Instant::now();
                         s.install_collision(prepared)?;
+                        installed_placed = placed;
                         s.set_dynamic_surfaces(&latest_dynamic);
                         perf.install(t.elapsed());
                         let first = built_at == PRELOAD_AT;
@@ -1314,6 +1347,13 @@ fn run(
                     }
                 }
             }
+        }
+        if pending_placed.is_some()
+            && let Ok(mut w) = static_world.try_lock()
+        {
+            let (keys, triangles) = pending_placed.take().expect("pending placed");
+            w.set_placed(keys, triangles);
+            rebuild_area = true;
         }
         if let Some(level) = pending_live {
             match static_world.try_lock() {
@@ -1810,6 +1850,7 @@ fn prepare_session(
     life(shared, |l| l.preparing = true);
     let area = static_world.lock().unwrap().around(at)?;
     log_source(log, at, &area.note);
+    crate::npc_pool::offer_area(at, &area.triangles, &area.tags, &area.rails);
     log(&format!(
         "collision around ({:.1}, {:.1}, {:.1}): {} triangles, rails: {} candidates {} lips {} runs {} rails; curb bevels {} on {} top edges",
         at.x,
@@ -2028,12 +2069,14 @@ fn start_builder(
                         .map_err(|_| "world cache poisoned")?
                         .around(centre)?;
                     log_source(&log, centre, &area.note);
+                    crate::npc_pool::offer_area(centre, &area.triangles, &area.tags, &area.rails);
                     let (n, r) = (area.triangles.len(), area.rails.len());
                     Ok((
                         builder.build_tagged(area.triangles, area.tags, area.rails)?,
                         n,
                         r,
                         area.bounds,
+                        area.placed,
                     ))
                 }))
                 .unwrap_or_else(|_| Err("collision builder panicked".into()));

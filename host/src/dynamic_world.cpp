@@ -182,6 +182,7 @@ bool DynamicWorld::AddBody(int entity, EntityKind kind) {
     // goes: the runtime reads its bound from GTA's physics level, never a box.
     if (route == PropCollisionIndex::Route::None && (kind != EntityKind::Object || isDoor)) { ++stats_.missingBounds; return false; }
     body.flags = PropCollisionIndex::AllowsBox(route) ? 1u : 0u; // Exact gaps must NEVER be filled by the fallback box.
+    if (kind == EntityKind::Object && std::find(placed_.begin(), placed_.end(), entity) != placed_.end()) body.flags |= 2u;
     bodies_.push_back(body);
     if (exact) ++stats_.exactBounds;
     else if (kind == EntityKind::Object) ++stats_.missingBounds;
@@ -207,7 +208,8 @@ void DynamicWorld::Gather(int self, SvVec3 center, float radius, int presentatio
         stats_.pooled += static_cast<std::uint32_t>(n);
         for (int i = 0; i < n; ++i) {
             const int e = scratch_[i];
-            if (e == self || e == presentationEntity) continue;
+            if (e == self || e == presentationEntity || (ignored_ && e == ignored_)) continue;
+            if (kind == EntityKind::Object && std::find(placed_.begin(), placed_.end(), e) != placed_.end()) continue;
             const Vector3 p = Position(e, positionCheck_, positionLog_);
             const float d2 = Dist2(p, center);
             if (d2 <= kindRadius2) nearby.push_back({d2, e, kind});
@@ -216,6 +218,11 @@ void DynamicWorld::Gather(int self, SvVec3 center, float radius, int presentatio
     collect(worldGetAllVehicles, EntityKind::Vehicle, r2);
     collect(worldGetAllPeds, EntityKind::Ped, r2 * 0.5f);
     collect(worldGetAllObjects, EntityKind::Object, r2 * 0.5f);
+    for (const int e : placed_) {
+        if (!Call<BOOL>(gta::DOES_ENTITY_EXIST, e)) continue;
+        const float d2 = Dist2(Position(e, positionCheck_, positionLog_), center);
+        if (d2 <= kPlacedRadius * kPlacedRadius) nearby.push_back({d2, e, EntityKind::Object});
+    }
     std::sort(nearby.begin(), nearby.end(), [](const Candidate& a, const Candidate& b) { return a.d2 < b.d2; });
     for (const Candidate& c : nearby) {
         // A ped Skate can read as its own ragdoll parts gets no box.

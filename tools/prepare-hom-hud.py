@@ -5,6 +5,10 @@ user's own game files into the converted data root.
     python tools/prepare-hom-hud.py --game Skate_3 --assets local/skate-data/assets \
         --movie chyron --hud-ytd <hud.ytd>
 
+`--movie objectdropper` prepares Skate 3's Object Dropper screen into
+`private/hud-dropper`, with the controls it imports (button item, menu
+picker, scrollbar, tabs, swatch renderer and theirs) merged in
+(`merge_imports`).
 `--movie trickanalyser` prepares the Trick Analyzer (the gesture of the last
 trick) into `private/hud-analyser`, with the gesture_item control merged in.
 `--movie chyron` prepares Skate's TRAX now-playing banner (GTA's radio on
@@ -52,7 +56,143 @@ MOVIES = {
     'homscoring': (BUNDLE, MANIFEST, 'hud-hom'),
     'chyron': ('data/fe/source/screens/main/chyron', 'runtime/chyron.json', 'hud-chyron'),
     'trickanalyser': ('data/fe/source/screens/hud2/trickanalyser', 'runtime/trickanalyser.json', 'hud-analyser'),
+    'objectdropper': ('data/fe/source/screens/objectdropper/objectdropper', 'runtime/objectdropper.json', 'hud-dropper'),
 }
+CONTROLS = 'data/fe/source/controls/'
+# Skate 3's Xbox 360 button bank: Button Item controls and `<B:name>` text
+# tags draw these (retail's RenderButton); the runtime places them.
+BUTTONS = 'data/fe/source/images/buttons/xbox360'
+BUTTON_BANK = Path('assets') / BUTTONS / 'buttons'
+
+# Imported controls are inlined: the HUD VM loads one movie. Each imported
+# bundle's characters move up by IMPORT_SHIFT per bundle and its action
+# blocks by ACTION_SHIFT (offsets are per .apt file; branch targets are
+# absolute, so a whole block moves together). A placeholder becomes a copy
+# of the export it names. `symbols` lists every character id carrying an
+# exported symbol name, for Object.registerClass (the runtime binds classes;
+# the VM has no linkage of its own).
+IMPORT_SHIFT, ACTION_SHIFT = 1000, 10_000_000
+
+
+def shift_code(code, delta):
+    out = []
+    for row in code:
+        row = dict(row, offset=row['offset'] + delta)
+        if row.get('next'):
+            row['next'] += delta
+        if row.get('target') is not None:
+            row['target'] += delta
+        if row.get('body'):
+            row['body'] = shift_code(row['body'], delta)
+        out.append(row)
+    return out
+
+
+def shifted_character(c, shift, delta):
+    c = json.loads(json.dumps(c))
+    c['id'] += shift
+    if c.get('text'):
+        c['text']['font_id'] += shift
+    for f in c.get('frames', []):
+        for k in f['controls']:
+            if k['type_name'].startswith('place_object') and k['flags'] & 2:
+                k['character_id'] += shift
+            if k.get('actions_offset'):
+                k['actions_offset'] += delta
+    return c
+
+
+def clip_parameters(apt: bytes, actions, offset):
+    """A placement's clip actions (flag 0x80) as component parameters: retail
+    authors only `onClipEvent(initialize)` blocks of `push name; <0xA6>
+    value` pairs, which set the clip's own property before it constructs.
+    Anything else is refused rather than dropped."""
+    import struct
+    count, records = struct.unpack_from('>II', apt, offset)
+    params = {}
+    for i in range(count):
+        flags, _key, code = struct.unpack_from('>III', apt, records + 12 * i)
+        rows = [r for r in actions.stream(code) if r['opcode'] != 0]
+        if flags != 0x40000 or len(rows) % 2 or any(
+                (a['opcode'], b['opcode']) != (0xA1, 0xA6) for a, b in zip(rows[::2], rows[1::2])):
+            raise ValueError(f'Unsupported clip actions at {offset:#x}: {flags:#x} {rows}')
+        params.update({a['operand']: b['operand'] for a, b in zip(rows[::2], rows[1::2])})
+    return params
+
+
+def take_clip_parameters(bundle, apt, actions, ids, table):
+    """Moves the clip parameters of `ids`' placements into `table`
+    (`<parent id>/<depth>` -> {property: value})."""
+    for cid in ids:
+        for f in bundle['characters'][cid].get('frames', []):
+            for k in f['controls']:
+                if k['type_name'].startswith('place_object') and k['flags'] & 0x80:
+                    table[f"{cid}/{k['depth']}"] = clip_parameters(apt, actions, k['actions_offset'])
+                    k['flags'] &= ~0x80
+                    k['actions_offset'] = 0
+
+
+def merge_imports(cache, bundle, work):
+    """Inlines `bundle`'s imports (recursively). Returns ({character id:
+    (bundle, id there)}, extra action blocks, {symbol: [character ids]})."""
+    origin, blocks, symbols, merged, params = {}, {}, {}, {}, {}
+    # An imported file's class definitions (`#initclip`: do_init_action on
+    # its root timeline): run before the importer's, dependencies first.
+    inits = []
+    for name, cid in bundle['exports'].items():
+        symbols.setdefault(name, []).append(cid)
+
+    def bring(target):
+        if target in merged:
+            return merged[target]
+        index = len(merged) + 1
+        shift, delta = index * IMPORT_SHIFT, index * ACTION_SHIFT
+        merged[target] = (shift, delta)
+        source = cache.load_bundle(target)
+        apt_path = work / 'raw' / (target + '.apt')
+        actions = Actions(apt_path.read_bytes(), apt_path.with_suffix('.const').read_bytes())
+        raw = apt_path.read_bytes()
+        local = {}
+        take_clip_parameters(source, raw, actions, [c['id'] for c in source['characters'].values()], local)
+        for key, value in local.items():
+            parent, depth = key.split('/', 1)
+            params[f'{int(parent) + shift}/{depth}'] = value
+        own_inits = []
+        for c in source['characters'].values():
+            for f in c.get('frames', []):
+                for k in f['controls']:
+                    offset = k.get('actions_offset')
+                    if k['type_name'] in ('do_action', 'do_init_action') and offset:
+                        blocks[str(offset + delta)] = shift_code(rewrite_dropper_ops(rewrite_to_string(actions.stream(offset))), delta)
+                        if c['id'] == 0 and k['type_name'] == 'do_init_action':
+                            own_inits.append({'type_name': 'do_init_action', 'actions_offset': offset + delta})
+            if c['id'] == 0:
+                continue
+            m = shifted_character(c, shift, delta)
+            origin[m['id']] = (target, c['id'])
+            bundle['characters'][m['id']] = m
+        for name, cid in source['exports'].items():
+            symbols.setdefault(name, []).append(cid + shift)
+        place(source['imports'], shift)
+        inits.extend(own_inits)
+        return merged[target]
+
+    def place(imports, owner_shift):
+        for placeholder, spec in imports.items():
+            target = 'data/fe/' + spec['file']
+            shift, _ = bring(target)
+            export = cache.load_bundle(target)['exports'][spec['name']]
+            copy = json.loads(json.dumps(bundle['characters'][export + shift]))
+            copy['id'] = int(placeholder) + owner_shift
+            bundle['characters'][copy['id']] = copy
+            origin[copy['id']] = (target, export)
+            symbols.setdefault(spec['name'], []).append(copy['id'])
+
+    place(bundle['imports'], 0)
+    root = bundle['characters'][0]['frames'][0]['controls']
+    root[:0] = inits
+    return origin, blocks, symbols, params
+
 
 # The Trick Analyzer imports `Gesture Item` (its character 6) from this
 # control, whose script attachMovie()s the trick's `g_<gesture>` clip into its
@@ -121,6 +261,40 @@ def merge_gestures(bundle, gestures):
     return origin
 
 
+def rewrite_dropper_ops(code):
+    """The Object Dropper's scripts use four opcodes the HUD VM lacks, each
+    rewritten at the same offset into ones it has: InitArray (0x42) as
+    `new Array(...)` (whose arguments become the elements, as the VM builds
+    it); ToNumber (0x4A) as `* 1`; push-string-GetMember (0xA5) as push
+    string + GetMember; InitObject (0x43), always after a literal pair count,
+    as a call to the runtime's `__InitObject(value, name, ...)` with twice
+    that many arguments."""
+    out = []
+    for i, row in enumerate(code):
+        if row.get('body'):
+            row = dict(row, body=rewrite_dropper_ops(row['body']))
+        at, nxt = row['offset'], row.get('next', 0)
+        if row['opcode'] == 0x42:
+            out.append({'offset': at, 'opcode': 0xA1, 'operand': 'Array', 'next': at})
+            out.append({'offset': at, 'opcode': 0x40, 'next': nxt})
+        elif row['opcode'] == 0x4A:
+            out.append({'offset': at, 'opcode': 0x5A, 'next': at})
+            out.append({'offset': at, 'opcode': 0x0C, 'next': nxt})
+        elif row['opcode'] == 0xA5:
+            out.append({'offset': at, 'opcode': 0xA1, 'operand': row['operand'], 'next': at})
+            out.append({'offset': at, 'opcode': 0x4E, 'next': nxt})
+        elif row['opcode'] == 0x43:
+            count = out[-1] if out else None
+            if not count or count['opcode'] != 0xB5:
+                raise ValueError(f'InitObject without a literal count at {at:#x}')
+            out[-1] = dict(count, operand=count['operand'] * 2)
+            out.append({'offset': at, 'opcode': 0xA1, 'operand': '__InitObject', 'next': at})
+            out.append({'offset': at, 'opcode': 0x3D, 'next': nxt})
+        else:
+            out.append(row)
+    return out
+
+
 def rewrite_to_string(code):
     """Replace ToString (0x4B) with push "" + add, and Trace (0x26) with Pop,
     keeping offsets (jump targets resolve to the first instruction at an
@@ -142,21 +316,35 @@ def rewrite_to_string(code):
 def prepare(game: Path, work: Path, collections: Path, bundle: str = BUNDLE, manifest: str = MANIFEST) -> Path:
     BUNDLE, MANIFEST = bundle, manifest
     analyser = BUNDLE == MOVIES['trickanalyser'][0]
-    extract_project(game, work, prefixes=(BUNDLE, GESTURES) if analyser else (BUNDLE,), update=True)
+    dropper = BUNDLE == MOVIES['objectdropper'][0]
+    prefixes = (BUNDLE, GESTURES) if analyser else (BUNDLE, CONTROLS, BUTTONS) if dropper else (BUNDLE,)
+    # The button bank is in fedynamic.big (as the session marker's).
+    extract_project(game, work, prefixes=prefixes, update=True, include_dynamic=dropper)
     cache = AssetCache(work)
     mappings = font_mapping(collections, cache)
     bundle = cache.load_bundle(BUNDLE)
     origin = merge_gestures(bundle, cache.load_bundle(GESTURES)) if analyser else {}
+    imported, symbols, params = {}, {}, {}
+    if dropper:
+        main_apt = work / 'raw' / (BUNDLE + '.apt')
+        main_actions = Actions(main_apt.read_bytes(), main_apt.with_suffix('.const').read_bytes())
+        take_clip_parameters(bundle, main_apt.read_bytes(), main_actions, list(bundle['characters']), params)
+        origin, imported, symbols, more = merge_imports(cache, bundle, work)
+        params.update(more)
     apt_path = work / 'raw' / (BUNDLE + '.apt')
     const_path = apt_path.with_suffix('.const')
     actions = Actions(apt_path.read_bytes(), const_path.read_bytes())
     blocks = {}
     for c in bundle['characters'].values():
+        if c['id'] in origin and dropper:  # merged imports bring their own blocks
+            continue
         for f in c.get('frames', []):
             for control in f['controls']:
-                if control['type_name'] in ('do_action', 'do_init_action') and control.get('actions_offset')                         and str(control['actions_offset']) not in blocks:
+                if control['type_name'] in ('do_action', 'do_init_action') and control.get('actions_offset')                         and control['actions_offset'] < ACTION_SHIFT and str(control['actions_offset']) not in blocks:
                     offset = control['actions_offset']
-                    blocks[str(offset)] = rewrite_to_string(actions.stream(offset))
+                    code = rewrite_to_string(actions.stream(offset))
+                    blocks[str(offset)] = rewrite_dropper_ops(code) if dropper else code
+    blocks.update(imported)
     shapes, fonts = {}, {}
     for c in bundle['characters'].values():
         if c['type_name'] == 'shape':
@@ -181,6 +369,10 @@ def prepare(game: Path, work: Path, collections: Path, bundle: str = BUNDLE, man
         'font_mappings': mappings,
         'language': {row['label'].strip(): row['value'] for row in language['entries']},
         'unresolved_fonts': [family for family, asset in fonts.items() if asset is None],
+        'symbols': symbols,
+        'clip_parameters': params,
+        'buttons': [{'name': t['name'], 'rgba': (BUTTON_BANK / t['rgba_file']).as_posix(), 'width': t['width'], 'height': t['height']}
+                    for t in json.loads((work / BUTTON_BANK / 'manifest.json').read_text())['textures']] if dropper else [],
     }
     if result['unresolved_fonts']:
         raise ValueError('Unresolved HoM HUD fonts: ' + ', '.join(result['unresolved_fonts']))
@@ -249,6 +441,8 @@ def textures(manifest: dict):
     for font in manifest['fonts'].values():
         size = font['definition']['textures'][0]
         yield font['texture'], size['width'], size['height']
+    for button in manifest.get('buttons', []):
+        yield button['rgba'], button['width'], button['height']
 
 
 def contained(root: Path, relative: str) -> Path:

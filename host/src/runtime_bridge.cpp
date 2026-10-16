@@ -56,6 +56,8 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     sym(groundAt_, "sv_ground_at");
     sym(setPhysicsLevel_, "sv_set_physics_level");
     sym(playLine_, "sv_play_line");
+    // Optional: the host draws its own dropper list without it.
+    setObjectDropper_ = reinterpret_cast<SvSetObjectDropperFn>(GetProcAddress(module_, "sv_set_object_dropper"));
     if (!missing.empty()) {
         error = "SkateVRuntime.dll is missing required ABI exports: " + missing;
         return false;
@@ -231,6 +233,10 @@ bool RuntimeBridge::SetRidingStyle(int style) {
 
 bool RuntimeBridge::SetEquipment(float truck, float wheel) {
     return runtime_ && setEquipment_ && setEquipment_(runtime_, truck, wheel) != 0;
+}
+
+bool RuntimeBridge::SetObjectDropper(const SvObjectDropper& dropper) {
+    return runtime_ && setObjectDropper_ && setObjectDropper_(runtime_, &dropper) != 0;
 }
 
 bool RuntimeBridge::SetCameraType(int type) {

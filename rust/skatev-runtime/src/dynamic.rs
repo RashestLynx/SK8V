@@ -19,6 +19,10 @@ pub struct HostBody {
     pub velocity: Option<(Vec3, Vec3)>,
     /// Vehicle `bumper_r` bone (GTA world), when the host found one.
     pub grab_point: Option<Vec3>,
+    /// Host flag 2: a frozen prop the host's Object Dropper put down. Its
+    /// bound joins the static area (`StaticWorld::set_placed`), so Skate
+    /// finds grind rails on it like on the map.
+    pub placed: bool,
 }
 
 impl HostBody {
@@ -39,7 +43,26 @@ impl HostBody {
         let grab_point = (b.grab_flags & 1 != 0)
             .then(|| v(b.grab_point))
             .filter(|p| p.is_finite());
-        Some(Self { model: b.model_hash, position, axes, fallback, allow_box: b.flags & 1 != 0, velocity, grab_point })
+        Some(Self { model: b.model_hash, position, axes, fallback, allow_box: b.flags & 1 != 0, velocity, grab_point, placed: b.flags & 2 != 0 })
+    }
+
+    /// Identifies a placed body where it stands: entity tag, model and its
+    /// transform to the centimetre (a moved or replaced prop is a new key).
+    pub fn placed_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = rustc_hash::FxHasher::default();
+        (self.fallback.tag, self.model).hash(&mut h);
+        for v in std::iter::once(self.position).chain(self.axes) {
+            for c in v.to_array() { ((c * 100.0).round() as i32).hash(&mut h); }
+        }
+        h.finish()
+    }
+
+    /// `t` in GTA world space (counterclockwise kept), for the static area.
+    pub fn transform_gta(&self, t: &svwc::Tri) -> svwc::Tri {
+        let mut v = t.v.map(|p| (self.position + self.axes[0]*p[0] + self.axes[1]*p[1] + self.axes[2]*p[2]).to_array());
+        if self.axes[0].cross(self.axes[1]).dot(self.axes[2]) < 0. { v.swap(1, 2); }
+        svwc::Tri { v, material: t.material }
     }
 
     pub fn transform(&self, t: &svwc::Tri) -> ([[f32; 3]; 3], u32) {
@@ -215,6 +238,13 @@ impl Templates {
         }
         out
     }
+    /// A placed body's bound in GTA world space, once its model is loaded
+    /// (`triangles` loads it); None while it has no bound.
+    pub fn placed_triangles(&self, body: &HostBody) -> Option<Vec<svwc::Tri>> {
+        let model = self.models.get(&body.model)?.as_ref()?;
+        Some(model.iter().map(|(t, _)| body.transform_gta(t)).collect())
+    }
+
     fn install(&mut self, model: u32, tris: Vec<svwc::Tri>, source: &str, messages: &mut Vec<String>) {
         messages.push(format!("dynamic model {model:08x}: {} {source}{}", tris.len(),
             self.masses.get(&model).map_or(String::new(), |m| format!(", {:.1} kg", m.kg))));
@@ -367,7 +397,7 @@ mod tests {
         let authored = svwc::Tri { v: [[2.,0.,0.], [2.,1.,0.], [2.,0.,1.]], material: 3 };
         svwc::write(&mut std::fs::File::create(&file).unwrap(), &[authored], 64.).unwrap();
         let fallback = HostBox { tag: 19, center: Vec3::ZERO, rotation: Quat::IDENTITY, half_extents: Vec3::ONE };
-        let mut body = HostBody { model: 1, position: Vec3::ZERO, axes: [Vec3::X, Vec3::Y, Vec3::Z], fallback, allow_box: true, velocity: None, grab_point: None };
+        let mut body = HostBody { model: 1, position: Vec3::ZERO, axes: [Vec3::X, Vec3::Y, Vec3::Z], fallback, allow_box: true, velocity: None, grab_point: None, placed: false };
         let mut models = Templates::new(&root.join("world.svwc"));
         let (first, messages) = models.triangles(&[body.clone()], None);
         assert_eq!(first[0].2, crate::materials::surface(3).packed());
@@ -393,7 +423,7 @@ mod tests {
     #[test]
     fn exact_bounds_preserve_gaps_and_full_affine_transform() {
         let fallback = HostBox { tag: 0x21234567, center: Vec3::ZERO, rotation: Quat::IDENTITY, half_extents: Vec3::ONE };
-        let body = HostBody { model: 1, position: Vec3::new(10.,20.,30.), axes: [Vec3::Y*2., -Vec3::X, Vec3::Z], fallback, allow_box: true, velocity: None, grab_point: None };
+        let body = HostBody { model: 1, position: Vec3::new(10.,20.,30.), axes: [Vec3::Y*2., -Vec3::X, Vec3::Z], fallback, allow_box: true, velocity: None, grab_point: None, placed: false };
         let t = svwc::Tri { v: [[2.,0.,0.], [2.,1.,0.], [2.,0.,1.]], material: 3 };
         let (points, tag) = body.transform(&t);
         assert_eq!(tag, 0xA1234567);
@@ -408,7 +438,7 @@ mod tests {
         t.extents.insert(7, (Vec3::new(-1.0, -2.5, -0.6), Vec3::new(1.0, 2.5, 0.8)));
         let fallback = HostBox { tag: 0x0000_0042, center: Vec3::ZERO, rotation: Quat::IDENTITY, half_extents: Vec3::ONE };
         let body = HostBody { model: 7, position: Vec3::new(10.0, 20.0, 1.0), axes: [Vec3::X, Vec3::Y, Vec3::Z], fallback,
-            allow_box: false, velocity: Some((Vec3::new(0.0, 5.0, 0.0), Vec3::ZERO)), grab_point: Some(Vec3::new(10.2, 17.6, 0.7)) };
+            allow_box: false, velocity: Some((Vec3::new(0.0, 5.0, 0.0), Vec3::ZERO)), grab_point: Some(Vec3::new(10.2, 17.6, 0.7)), placed: false };
         let lines = t.grab_lines(&[body.clone()]);
         assert_eq!(lines.len(), 1);
         let l = &lines[0];
@@ -478,7 +508,7 @@ bad line
         let mut t = Templates { directory: PathBuf::new(), models: HashMap::new(), extents: HashMap::new(), misses: HashMap::new(), masses, standoff: 0.0 };
         let fallback = HostBox { tag: 9, center: Vec3::new(5.0, 6.0, 1.0), rotation: Quat::IDENTITY, half_extents: Vec3::new(1.0, 2.0, 0.5) };
         let body = HostBody { model: 0xeb70965f, position: Vec3::new(5.0, 6.0, 0.3), axes: [Vec3::X, Vec3::Y, Vec3::Z], fallback,
-            allow_box: true, velocity: Some((Vec3::new(0.0, 8.0, 0.0), Vec3::new(0.0, 0.0, 0.5))), grab_point: None };
+            allow_box: true, velocity: Some((Vec3::new(0.0, 8.0, 0.0), Vec3::new(0.0, 0.0, 0.5))), grab_point: None, placed: false };
         let p = t.proxies(&[body.clone()]);
         assert_eq!(p.len(), 1);
         assert!((p[0].inverse_mass - 1.0 / 1200.0).abs() < 1e-9);

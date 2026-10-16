@@ -52,6 +52,8 @@ public:
     bool SetLipRule(bool enabled);
     bool SetDifficulty(int index);
     bool SetCameraType(int type);  // 0 Low, 1 High
+    // Skate 3's Object Dropper screen (optional export); false: not shown.
+    bool SetObjectDropper(const SvObjectDropper& dropper);
     bool SetGestures(const int (&up_down_left_right)[4]);  // catalog indices; all < 0: off
     bool SetPosture(int profile);                // 0 none, 1 stiff, 2 slouch, 3 buff
     bool SetRidingStyle(int style);              // 0 none, 1 Loose, 2 Gonzo, 3 Aggressive
@@ -63,6 +65,8 @@ public:
     bool SetPhysicsLevel(std::uintptr_t table, std::uintptr_t imageLo, std::uintptr_t imageHi);
     bool PlayLine(const std::string& utf8Path);
     std::uint32_t ApiVersion() const { return apiVersion_; }
+    // For optional exports resolved by their own module (npc_skaters.cpp).
+    HMODULE Module() const { return module_; }
 
 private:
     HMODULE module_ = nullptr;
@@ -97,6 +101,7 @@ private:
     SvSetLipRuleFn setLipRule_ = nullptr;
     SvSetDifficultyFn setDifficulty_ = nullptr;
     SvSetCameraTypeFn setCameraType_ = nullptr;
+    SvSetObjectDropperFn setObjectDropper_ = nullptr; // optional (older runtimes lack it)
     SvSetGesturesFn setGestures_ = nullptr;
     SvSetPostureFn setPosture_ = nullptr;
     SvSetRidingStyleFn setRidingStyle_ = nullptr;

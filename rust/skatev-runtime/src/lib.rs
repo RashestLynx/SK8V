@@ -12,6 +12,8 @@ pub mod ped;
 pub mod ped_bodies;
 pub mod quirk;
 pub mod line;
+pub mod npc;
+pub mod npc_pool;
 pub mod rails;
 pub mod skin;
 mod worker;
@@ -340,6 +342,9 @@ struct Runtime {
     /// (each 16.7 ms), which put the ped one Skate tick off its board and
     /// camera (~16 cm at 10 m/s). The pose getters answer from this frame.
     frame: Mutex<Option<Frame>>,
+    /// NPC skaters (`sv_npc_*`), started by the first configure.
+    npc: Mutex<Option<npc_pool::Pool>>,
+    data_root: PathBuf,
 }
 
 struct Frame {
@@ -473,6 +478,7 @@ pub unsafe extern "C" fn sv_create(info: *const SvCreateInfo) -> *mut c_void {
         // Skate profile stance: 0 regular (default), 1 goofy (flag 8).
         let natural_stance = u32::from(info.presentation_flags & 8 != 0);
         log(&format!("profile stance: {}", if natural_stance == 0 { "regular" } else { "goofy" }));
+        let data_root = root.clone();
         let (jobs, shared) =
             worker::spawn(root, cache, budget, board_only, hall_of_meat, natural_stance, Arc::clone(&log));
         Box::into_raw(Box::new(Runtime {
@@ -481,6 +487,8 @@ pub unsafe extern "C" fn sv_create(info: *const SvCreateInfo) -> *mut c_void {
             steps_sent: AtomicU64::new(0),
             log,
             frame: Mutex::new(None),
+            npc: Mutex::new(None),
+            data_root,
         })) as *mut c_void
     })
 }
@@ -796,6 +804,112 @@ pub unsafe extern "C" fn sv_get_board_pose(rt: *const c_void, out: *mut SvBoardP
             entity: entity.to_cols_array(),
             world: pose.map(|m| m.to_cols_array()),
         }; }
+        1
+    })
+}
+
+/// Optional NPC skaters: one ambient skater, GTA space. `flags` bit 0: riding
+/// (the host shows a ped of `model_hash` posed by the bones). `generation`
+/// changes on every respawn (snap the ped there).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SvNpc {
+    pub size: u32,
+    pub flags: u32,
+    pub model_hash: u32,
+    pub generation: u32,
+    pub tick: u64,
+    pub position: SvVec3,
+    pub heading_degrees: f32,
+    pub velocity: SvVec3,
+    pub bone_count: u32,
+    pub state_utf8: [u8; 32],
+    pub board: SvBoardPose,
+}
+
+/// sv_npc_configure(rt, count, ped_cache_root): how many NPC skaters ride
+/// near the player (0 off, at most 4) and the ped cache their models come
+/// from. Sessions build in the background. Returns 1 when queued.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_npc_configure(rt: *mut c_void, count: u32, ped_cache_root: *const c_char) -> u32 {
+    guard(0, || {
+        let Some(rt) = (unsafe { runtime(rt) }) else { return 0 };
+        let Some(cache) = (unsafe { path_arg(ped_cache_root) }) else { return 0 };
+        let mut npc = rt.npc.lock().unwrap();
+        if npc.is_none() {
+            if count == 0 {
+                return 1;
+            }
+            match npc_pool::Pool::start(rt.data_root.clone(), Arc::clone(&rt.log)) {
+                Ok(p) => *npc = Some(p),
+                Err(e) => {
+                    (rt.log)(&format!("npc skaters: not started ({e})"));
+                    return 0;
+                }
+            }
+        }
+        npc.as_ref().is_some_and(|p| p.configure(count as usize, cache)) as u32
+    })
+}
+
+/// sv_npc_frame(rt, dt, player, active): once per host frame; NPCs ride only
+/// while `active` (the player is skating). Returns 1 when queued.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_npc_frame(rt: *mut c_void, dt_seconds: f32, player: *const SvVec3, active: u32) -> u32 {
+    guard(0, || {
+        let (Some(rt), Some(p)) = (unsafe { runtime(rt) }, unsafe { player.as_ref() }) else { return 0 };
+        let npc = rt.npc.lock().unwrap();
+        npc.as_ref().is_some_and(|n| n.frame(dt_seconds, Vec3::new(p.x, p.y, p.z), active != 0)) as u32
+    })
+}
+
+/// sv_npc_get(rt, index, out, bones, capacity_bones): NPC `index`'s latest
+/// state and its ped's bone world matrices (16 floats each, RAGE rows, the
+/// model's bone order). Returns 1 when written.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_npc_get(rt: *const c_void, index: u32, out: *mut SvNpc, bones: *mut f32, capacity_bones: u32) -> u32 {
+    guard(0, || {
+        let Some(rt) = (unsafe { runtime(rt) }) else { return 0 };
+        if out.is_null() || unsafe { (*out).size } != size_of::<SvNpc>() as u32 {
+            return 0;
+        }
+        let npc = rt.npc.lock().unwrap();
+        let Some(pool) = npc.as_ref() else { return 0 };
+        let view = match pool.views.lock().unwrap().get(index as usize) {
+            Some(v) => v.clone(),
+            None => return 0,
+        };
+        let n = if bones.is_null() { 0 } else { view.pose.len().min(capacity_bones as usize) };
+        for (i, m) in view.pose.iter().take(n).enumerate() {
+            let cols = m.to_cols_array();
+            unsafe { ptr::copy_nonoverlapping(cols.as_ptr(), bones.add(16 * i), 16) };
+        }
+        let mut o = SvNpc {
+            size: size_of::<SvNpc>() as u32,
+            flags: u32::from(view.active),
+            model_hash: view.model,
+            generation: view.generation,
+            tick: view.tick,
+            position: v3(view.position),
+            heading_degrees: view.heading,
+            velocity: v3(view.velocity),
+            bone_count: n as u32,
+            state_utf8: [0; 32],
+            board: SvBoardPose {
+                size: size_of::<SvBoardPose>() as u32,
+                bone_count: 0,
+                tick: view.tick,
+                entity: [0.0; 16],
+                world: [[0.0; 16]; 7],
+            },
+        };
+        copy_str(&mut o.state_utf8, &view.state);
+        if let Some((world, entity)) = view.board {
+            o.board.bone_count = 7;
+            o.board.entity = entity.to_cols_array();
+            o.board.world = world.map(|m| m.to_cols_array());
+        }
+        unsafe { *out = o };
         1
     })
 }
@@ -1599,6 +1713,60 @@ pub unsafe extern "C" fn sv_audio_get_status(rt: *const c_void, out: *mut SvAudi
     })
 }
 
+/// Skate 3's Object Dropper screen state (host/include/skatev_runtime.h).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SvObjectDropper {
+    pub size: u32,
+    pub visible: u32,
+    pub mode: u32,
+    pub mode_serial: u32,
+    pub tab: u32,
+    pub category: u32,
+    pub item: u32,
+    pub flags: u32,
+    pub lists_utf8: *const c_char,
+}
+
+/// Shows (or, `visible` 0, hides) Skate 3's Object Dropper screen. Returns 1
+/// when the runtime has the screen (prepared by setup) and queued the state;
+/// 0 otherwise, and the host draws its own list.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_set_object_dropper(rt: *mut c_void, state: *const SvObjectDropper) -> u32 {
+    guard(0, || {
+        let (Some(rt), Some(d)) = (unsafe { runtime(rt) }, unsafe { state.as_ref() }) else { return 0 };
+        if d.size as usize != size_of::<SvObjectDropper>() {
+            return 0;
+        }
+        let lists = if d.lists_utf8.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(d.lists_utf8) }.to_string_lossy().into_owned()
+        };
+        if lists.len() > 64 * 1024 {
+            return 0;
+        }
+        let mut groups = lists.split('\x1e').map(|g| if g.is_empty() { Vec::new() } else { g.split('\x1f').map(String::from).collect() });
+        let mut next = || groups.next().unwrap_or_default();
+        let state = skate_hud::DropperState {
+            super_categories: next(),
+            categories: next(),
+            descriptions: next(),
+            items: next(),
+            super_category: d.tab as usize,
+            category: d.category as usize,
+            item: d.item as usize,
+            selecting_category: d.flags & 1 != 0,
+            placing: d.flags & 2 != 0,
+            duplicate: d.flags & 4 != 0,
+            fine_tune: d.flags & 8 != 0,
+        };
+        let ui = hud::DropperUi { visible: d.visible != 0, mode: d.mode, serial: d.mode_serial, state };
+        let available = rt.shared.lock().unwrap().hud.dropper_available;
+        (available && rt.jobs.send(Job::Dropper(Box::new(ui))).is_ok()) as u32
+    })
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct SvDynamicBody {
@@ -1792,6 +1960,9 @@ mod tests {
     #[test]
     fn abi_layout_matches_header() {
         assert_eq!(size_of::<SvBoardPose>(), 528);
+        assert_eq!(size_of::<SvNpc>(), 616);
+        assert_eq!(offset_of!(SvNpc, board), 88);
+        assert_eq!(offset_of!(SvNpc, state_utf8), 56);
         // Contact exchange (header static_asserts).
         assert_eq!(size_of::<SvDynamicBody>(), 144);
         assert_eq!(offset_of!(SvDynamicBody, linear_velocity), 104);

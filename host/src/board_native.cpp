@@ -20,17 +20,21 @@ bool g_poseReported=false;
 std::uint32_t g_ydrId=~0u,g_ytypId=~0u;
 ULONGLONG g_begin=0;
 // Bone indices of the seven board tags, for the skeleton they were read from.
-std::uintptr_t g_indexedSkeleton=0; int g_indices[7];
+struct BoneCache { std::uintptr_t skeleton=0; int indices[7]; };
+BoneCache g_bones;
+// NPC skaters' boards (npc_skaters.cpp): the same archetype, one object each.
+constexpr int kNpcBoards=4;
+int g_npcObjects[kNpcBoards]={}; BoneCache g_npcBones[kNpcBoards];
 void Log(const char* s){if(g_log)g_log(s);}
-bool Pose(const SvBoardPose& pose) {
+bool PoseObject(int object,BoneCache& cache,const SvBoardPose& pose) {
     probe::SkeletonInfo s; const char* why=nullptr;
-    if(!probe::ResolvePedSkeleton(g_object,s,why)||s.count!=7){if(!g_poseReported){char line[256];std::snprintf(line,sizeof(line),"native board: skeleton unavailable (%s, bones=%d); object hidden",why?why:"expected seven bones",s.count);Log(line);g_poseReported=true;}return false;}
-    if(s.skeleton!=g_indexedSkeleton) {
-        g_indexedSkeleton=0;
-        for(int i=0;i<7;++i) { g_indices[i]=probe::BoneIndexByTag(s,static_cast<std::uint16_t>(i)); if(g_indices[i]<0||g_indices[i]>=7)return false; }
-        g_indexedSkeleton=s.skeleton;
+    if(!probe::ResolvePedSkeleton(object,s,why)||s.count!=7){if(!g_poseReported){char line[256];std::snprintf(line,sizeof(line),"native board: skeleton unavailable (%s, bones=%d); object hidden",why?why:"expected seven bones",s.count);Log(line);g_poseReported=true;}return false;}
+    if(s.skeleton!=cache.skeleton) {
+        cache.skeleton=0;
+        for(int i=0;i<7;++i) { cache.indices[i]=probe::BoneIndexByTag(s,static_cast<std::uint16_t>(i)); if(cache.indices[i]<0||cache.indices[i]>=7)return false; }
+        cache.skeleton=s.skeleton;
     }
-    const int* indices=g_indices;
+    const int* indices=cache.indices;
     __try {
         const auto data=*reinterpret_cast<const std::uintptr_t*>(s.skeleton);
         const auto parents=*reinterpret_cast<const std::int16_t* const*>(data+0x38);
@@ -45,6 +49,18 @@ bool Pose(const SvBoardPose& pose) {
         }
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER){return false;}
+}
+bool Pose(const SvBoardPose& pose){return PoseObject(g_object,g_bones,pose);}
+// A presentation object of the registered board model at `p`, physics off.
+int Create(const float* p) {
+    const int object=gta::Call<int>(gta::CREATE_OBJECT_NO_OFFSET,Model,p[12],p[13],p[14],false,false,false,0);
+    if(!object)return 0;
+    gta::Call<void>(gta::SET_ENTITY_VISIBLE,object,false,false);
+    gta::Call<void>(gta::SET_ENTITY_AS_MISSION_ENTITY,object,true,false);gta::Call<void>(gta::FREEZE_ENTITY_POSITION,object,true);
+    gta::Call<void>(gta::SET_ENTITY_HAS_GRAVITY,object,false);gta::Call<void>(gta::SET_ENTITY_DYNAMIC,object,false);
+    gta::Call<void>(gta::SET_ENTITY_COLLISION,object,false,false);
+    gta::Call<void>(gta::SET_ENTITY_COMPLETELY_DISABLE_COLLISION,object,false,false);
+    return object;
 }
 void Remove(){if(g_object&&gta::Call<bool>(gta::DOES_ENTITY_EXIST,g_object))gta::Call<void>(gta::DELETE_OBJECT,&g_object);g_object=0;}
 bool Hide(){if(g_object&&gta::Call<bool>(gta::DOES_ENTITY_EXIST,g_object))gta::Call<void>(gta::SET_ENTITY_VISIBLE,g_object,false,false);return false;}
@@ -87,15 +103,11 @@ bool Tick(bool skating,const SvBoardPose& pose) {
     if(!g_object) {
         // The pinned Legacy DB and owned +CDCB74 wrapper both require eight
         // slots; +37F4D7D reads p7 at args+0x38 even in a local script.
-        g_object=gta::Call<int>(gta::CREATE_OBJECT_NO_OFFSET,Model,pose.entity[12],pose.entity[13],pose.entity[14],false,false,false,0);
+        // Despite the modern name, SET_ENTITY_COMPLETELY_DISABLE_COLLISION
+        // (in Create) uses collision-enable polarity on Legacy, matching the
+        // measured ped collisionDisabled=1 gate.
+        g_object=Create(pose.entity);
         if(!g_object){Fail("native board: CREATE_OBJECT_NO_OFFSET failed");return false;}
-        gta::Call<void>(gta::SET_ENTITY_VISIBLE,g_object,false,false);
-        gta::Call<void>(gta::SET_ENTITY_AS_MISSION_ENTITY,g_object,true,false);gta::Call<void>(gta::FREEZE_ENTITY_POSITION,g_object,true);
-        gta::Call<void>(gta::SET_ENTITY_HAS_GRAVITY,g_object,false);gta::Call<void>(gta::SET_ENTITY_DYNAMIC,g_object,false);
-        gta::Call<void>(gta::SET_ENTITY_COLLISION,g_object,false,false);
-        // Despite the modern name, this Legacy native uses collision-enable
-        // polarity, matching the measured ped collisionDisabled=1 gate.
-        gta::Call<void>(gta::SET_ENTITY_COMPLETELY_DISABLE_COLLISION,g_object,false,false);
         Log("native board: presentation object created; physics and collision disabled");
     }
     if(!gta::Call<bool>(gta::DOES_ENTITY_EXIST,g_object)){g_object=0;return false;}
@@ -107,4 +119,36 @@ bool Tick(bool skating,const SvBoardPose& pose) {
 }
 void Stop(){Remove();g_started=false;}
 int Entity(){return g_object;}
+bool TickNpc(int slot,bool show,const SvBoardPose& pose) {
+    if(slot<0||slot>=kNpcBoards)return false;
+    int& object=g_npcObjects[slot];
+    const bool valid=show&&pose.size==sizeof(SvBoardPose)&&pose.bone_count==7;
+    M entity{};posemath::Q quaternion{};
+    bool finite=valid;
+    if(valid){for(const auto& bone:pose.world)for(float f:bone)finite=finite&&std::isfinite(f);}
+    if(finite){std::memcpy(&entity,pose.entity,sizeof(entity));finite=posemath::RigidQuaternion(entity,quaternion);}
+    // Only once the player's board registered and loaded the model.
+    const bool ready=g_type&&!g_failed&&gta::Call<bool>(gta::HAS_MODEL_LOADED,Model);
+    if(!finite||!ready) {
+        if(object&&gta::Call<bool>(gta::DOES_ENTITY_EXIST,object))gta::Call<void>(gta::SET_ENTITY_VISIBLE,object,false,false);
+        return false;
+    }
+    if(object&&!gta::Call<bool>(gta::DOES_ENTITY_EXIST,object))object=0;
+    if(!object&&!(object=Create(pose.entity)))return false;
+    gta::Call<void>(gta::SET_ENTITY_COORDS_NO_OFFSET,object,pose.entity[12],pose.entity[13],pose.entity[14],false,false,false);
+    gta::Call<void>(gta::SET_ENTITY_QUATERNION,object,quaternion.x,quaternion.y,quaternion.z,quaternion.w);
+    const bool posed=PoseObject(object,g_npcBones[slot],pose);
+    gta::Call<void>(gta::SET_ENTITY_VISIBLE,object,posed,false);
+    return posed;
+}
+void StopNpcs() {
+    for(int& object:g_npcObjects) {
+        if(object&&gta::Call<bool>(gta::DOES_ENTITY_EXIST,object))gta::Call<void>(gta::DELETE_OBJECT,&object);
+        object=0;
+    }
+}
+bool IsNpcBoard(int entity) {
+    for(int object:g_npcObjects)if(entity&&object==entity)return true;
+    return false;
+}
 }

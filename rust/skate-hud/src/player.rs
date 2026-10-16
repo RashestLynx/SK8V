@@ -121,6 +121,16 @@ impl Assets {
         Self::load_movie(root, "trickanalyser.json")
     }
 
+    /// `<data_root>/private/hud-dropper` (tools/prepare-hom-hud.py --movie objectdropper).
+    pub fn dropper_dir_for(data_root: &Path) -> PathBuf {
+        data_root.join("private").join("hud-dropper")
+    }
+
+    /// The Object Dropper movie (`runtime/objectdropper.json`).
+    pub fn load_dropper(root: &Path) -> Result<Self, String> {
+        Self::load_movie(root, "objectdropper.json")
+    }
+
     /// The Hall of Meat movie (`runtime/homscoring.json`).
     pub fn load_hom(root: &Path) -> Result<Self, String> {
         Self::load_movie(root, "homscoring.json")
@@ -158,6 +168,13 @@ impl Assets {
         }
         for font in text.fonts.values() {
             files.push((font.texture.clone(), font.size));
+        }
+        // The Object Dropper's button bank (tools/prepare-hom-hud.py).
+        for button in source["buttons"].as_array().into_iter().flatten() {
+            let (Some(rgba), Some(w), Some(h)) = (button["rgba"].as_str(), button["width"].as_u64(), button["height"].as_u64()) else {
+                return Err(format!("{}: invalid button texture", path.display()));
+            };
+            files.push((rgba.to_string(), [w as u32, h as u32]));
         }
         files.sort();
         files.dedup_by(|a, b| a.0 == b.0);

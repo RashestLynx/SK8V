@@ -15,6 +15,8 @@
 //! - [`player`]: asset loading, the scorer -> HUD input mapping, edge offset,
 //!   flat draw list in output pixels;
 //! - [`hom`]: the Hall of Meat movie (`homscoring`) and its natives;
+//! - [`marker`]: the session-marker quick menu (hold LB);
+//! - [`dropper`]: the Object Dropper screen (`objectdropper`) and its natives;
 //! - [`layout`]: aspect ratio / safe area mapping of the 1280x720 movie;
 //! - [`raster`]: a CPU reference of the donor's GPU path (tests, previews).
 
@@ -44,8 +46,10 @@ pub mod hud_runtime;
 
 pub mod analyser;
 pub mod chyron;
+pub mod dropper;
 pub mod hom;
 pub mod layout;
+pub mod marker;
 mod movie;
 pub mod player;
 mod presentation;
@@ -53,6 +57,8 @@ pub mod raster;
 
 pub use analyser::AnalyserPlayer;
 pub use chyron::ChyronPlayer;
+pub use dropper::{DropperPlayer, DropperState};
 pub use hom::{HomData, HomPlayer};
 pub use layout::Layout;
+pub use marker::{MarkerHud, MarkerState};
 pub use player::{Assets, DrawCmd, Frame, Player, ScoreInput, Vertex};

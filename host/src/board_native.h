@@ -10,4 +10,10 @@ bool Tick(bool skating,const SvBoardPose& pose);
 // registered resources and loaded archetype/model for the next invocation.
 void Stop();
 int Entity(); // Exclude this presentation-only entity from ExternalQueries.
+// NPC skaters' boards (npc_skaters.cpp), script thread: slot `slot`'s board
+// object shown at `pose` (hidden when !show). Needs the player's board model
+// loaded (Start + a Tick). StopNpcs deletes them all.
+bool TickNpc(int slot,bool show,const SvBoardPose& pose);
+void StopNpcs();
+bool IsNpcBoard(int entity);
 }

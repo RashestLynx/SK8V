@@ -59,6 +59,12 @@ public:
     // Vehicle damage from Skate's impulses (VehicleDamage*): a vehicle whose
     // summed impulse this frame reaches `min` N s takes SET_VEHICLE_DAMAGE of
     // impulse * scale at the strongest contact, dent radius `radius`.
+    // Object Dropper props: always gathered (out to kPlacedRadius), sent with
+    // flag 2 so the runtime builds them into the static area (grind rails).
+    void SetPlaced(const std::vector<int>& placed) { placed_ = placed; }
+    // An entity Skate must not collide with (the dropper's placement ghost).
+    void SetIgnored(int entity) { ignored_ = entity; }
+    static constexpr float kPlacedRadius = 100.0f;
     void SetVehicleDamage(bool on, float scale, float min, float radius) {
         damage_ = on, damageScale_ = scale, damageMin_ = min, damageRadius_ = radius;
     }
@@ -95,6 +101,8 @@ private:
     std::unordered_map<int, DoorRef> doorRefs_;
     std::vector<int> scratch_;
     std::unordered_map<std::uint32_t, unsigned long> cooldown_;
+    std::vector<int> placed_;
+    int ignored_ = 0;
     bool exchange_ = false;
     bool pedParts_ = false;
     bool launch_ = false;

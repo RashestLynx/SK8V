@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 # tools/prepare-skate-overlay.ps1 (upstream/ itself is never edited).
 skate-host = { path = "../../build/overlay/skate/crates/skate-host" }
 skate-core = { path = "../../build/overlay/skate/crates/skate-core" }
+skate-data = { path = "../../build/overlay/skate/crates/skate-data" }
 bevy_math = "0.19"
 svwc = { path = "../svwc" }
 # Original Skate 3 HUD (donor HUD runtime compiled in place; see skate-hud).

@@ -49,6 +49,7 @@ python tools/prepare.py --skate "<Skate 3.iso or folder>" --gta "<GTA V folder>"
 | D-pad | Emotes, one per direction (set them in the SK8V menu) |
 | D-pad left/right, gun equipped | Change weapon |
 | Double-tap `X` on foot near a grabbable wall | GTA mantle, then return to Skate |
+| Hold `LB` + `B`, gun holstered | Object Dropper: left/right picks a group, up/down an object, `A` drops it, `X` removes the last, `B` closes |
 
 Swimming switches to GTA automatically and returns to Skate afterward. **Hall of Meat is on by default** and can be disabled in the SK8V menu, alongside other gameplay settings.
 
@@ -89,6 +90,10 @@ Logs and records are in `%LOCALAPPDATA%\SkateV` and can be deleted separately. S
 ## Building from Source
 
 Run BOOTSTRAP.bat to build the code, then follow BUILDING.md to package a release. The baked world collision data is copied from a published release.
+
+## Skate 3 assets
+
+**No Skate 3 assets are included in SK8V.** The Object Dropper's Skate 3 objects (rails, ledges, kickers, quarter pipes, benches and the rest of Skate 3's dropper list), the skater, the board, the audio and the HUD are all converted by setup on your PC from **your own copy** of Skate 3: the disc image or folder you select. They stay on your PC, in your GTA V folder's `SK8V` data, and are never uploaded or shared. Skate 3 is © Electronic Arts. Don't redistribute the converted files.
 
 ## License
 

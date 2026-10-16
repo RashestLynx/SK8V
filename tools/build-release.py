@@ -30,7 +30,7 @@ from _common import DONOR, DONOR_PIN, REPO, donor_commit, donor_head, sha256_fil
 
 TOOLS = ['prepare.py', 'gta_extract.py', 'xiso.py', 'setup_engine.py', '_common.py', 'convert-skate-data.py',
          'prepare-skate-audio.py', 'prepare-audio-tuning.py', 'prepare-hom-hud.py', 'prepare-hom-xray.py',
-         'prepare-board.py', 'prepare-board-native.py', 'prepare-ped-colliders.py', 'ped_collider_templates.py',
+         'prepare-board.py', 'prepare-board-native.py', 'prepare-dropper.py', 'prepare-park-lots.py', 'prepare-ped-colliders.py', 'ped_collider_templates.py',
          'build-vehicle-masses.py', 'build-board-weapon.py', 'build-board-icon.py', 'check-clip-layout.py',
          'SkateVLegacy.ini.template', 'board-wheel-icon.bin', 'setup-wizard.ps1',
          'get-python.ps1']
@@ -52,7 +52,11 @@ RETAIL = {'.big', '.xex', '.rpf', '.ydr', '.ydd', '.yft', '.ytd', '.ytyp', '.yma
 DONOR_PATHS = ['tools/asset_pipeline', 'tools/owned_game', 'tools/vendor/skate3_anim', 'tools/vendor/skate3_ui',
                'tools/vendor/utt', 'tools/default_skater_retail_manifest.json', 'tools/extract_default_skater.py',
                'tools/extract_session_marker.py', 'tools/install_prepared_hud.py', 'tools/prepare_hud.py',
-               'tools/prepare_runtime_huds.py']
+               'tools/prepare_runtime_huds.py',
+               # prepare-dropper.py: Skate's ClusteredMesh collision
+               'tools/vendor/university/tools/vanilla_map_extraction/tools/retail_collision_mesh.py',
+               # prepare-park-lots.py: Skate 3's world streams (the skate.Park lots)
+               'tools/vendor/university/tools/vanilla_map_extraction/tools/skate3_streams.py']
 
 def copy(src, dst):
     if not src.is_file():

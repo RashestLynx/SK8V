@@ -29,6 +29,8 @@
 #include "lifecycle.h"
 #include "thread_census.h"
 #include "menu.h"
+#include "object_dropper.h"
+#include "park_lot.h"
 #include "ps_pad.h"
 #include "map_states.h"
 #include "pack_loader.h"
@@ -36,6 +38,7 @@
 #include "pose_math.h"
 #include "live_clip.h"
 #include "natives.h"
+#include "npc_skaters.h"
 #include "ped_speech.h"
 #include "runtime_bridge.h"
 #include "version_guard.h"
@@ -992,6 +995,16 @@ void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
     SvOutput o{};
     if (g_runtime.Output(o) && o.tick != 0) s.last = o;
     g_runtime.Deactivate();
+    // Dropped objects go with Skate mode (the empty set takes them out of
+    // the runtime's static area too), except in a Create-a-Park lot, where
+    // they stay, as Skate 3's park keeps its objects.
+    if (parklot::Inside()) {
+        dropper::Close();
+    } else {
+        dropper::Clear();
+        s.world.SetPlaced({});
+        g_runtime.SetDynamicBodies(nullptr, 0);
+    }
     // GTA's camera takes over where Skate's camera looks, easing in; Skate's
     // camera stays until the ease is over.
     float camPitch = 0.0f, camHeading = NAN;
@@ -1098,7 +1111,7 @@ bool CheckDelegation(Session& s, const Config& cfg, const SvPad& pad) {
     const std::string_view state(s.last.state_utf8);
     const DWORD now = GetTickCount();
     const bool onFoot = state.rfind("Biped", 0) == 0;
-    const bool tap = s.climbTap.Update((pad.buttons & 0x4000) != 0, now); // X
+    const bool tap = s.climbTap.Update((pad.buttons & 0x4000) != 0 && !dropper::IsOpen(), now); // X (not the dropper's)
     if (WaterDepth(s.last.skater_position) >= cfg.swimDepth) {
         Delegate(s, cfg, Session::Delegation::Swim);
         return true;
@@ -1307,6 +1320,9 @@ void BeginActive(Session& s, const Config& cfg) {
         std::filesystem::u8path(cfg.dataRoot).wstring(), Log);
     if (cfg.posePed) pedcollision::Start(g_gameDir + L"SkateVLegacy.ini",
         std::filesystem::u8path(cfg.dataRoot).wstring(), Log);
+    dropper::SetDataRoot(std::filesystem::u8path(cfg.dataRoot).wstring());
+    static bool s_npcStarted = false; // the runtime keeps its NPC sessions for the process
+    if (!std::exchange(s_npcStarted, true)) npcskaters::Start(g_runtime.Module(), g_runtime.Handle(), g_gameDir + L"SkateVLegacy.ini", cfg.pedCache, Log);
     if (s.fadingCam && Call<BOOL>(gta::DOES_CAM_EXIST, s.fadingCam)) Call<void>(gta::DESTROY_CAM, s.fadingCam, 0);
     s.fadingCam = 0;
     s.cam = Call<Cam>(gta::CREATE_CAM, "DEFAULT_SCRIPTED_CAMERA", 1);
@@ -1601,10 +1617,15 @@ void BoardControls(Session& s, const Config& cfg, SvPad& pad) {
     const std::uint16_t released = s.aimPrevButtons & ~buttons;
     s.aimPrevButtons = buttons;
     RadioTick(s);
+    // Gun away, LB + B opens Skate 3's Object Dropper (its list takes the d-pad, A, B and X
+    // while up). Gun out, LB aims and B reloads.
+    const bool dropping = dropper::IsOpen();
+    if (s.armed) dropper::Close();
+    else dropper::Controls(pad, pressed);
     // Gun away, LB + d-pad left/right steps the radio (Skate 3's TRAX layout; LB + up/down is
     // Skate's session marker). The plain d-pad is Skate's gestures; a direction set to None
     // does not reach Skate.
-    if (cfg.radioControls && !s.armed && (buttons & 0x0100)) {
+    if (cfg.radioControls && !s.armed && !dropping && !dropper::IsOpen() && (buttons & 0x0100)) {
         if (pressed & 0x0008) StepRadio(s, 1);  // right: next station
         if (pressed & 0x0004) StepRadio(s, -1); // left: previous
     }
@@ -2058,6 +2079,8 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     in.aspect_ratio = Call<float>(gta::GET_ASPECT_RATIO, 0);
     in.pad = pad;
     BoardControls(s, cfg, in.pad);
+    // Skate holds still while the Object Dropper is open (its pad is the dropper's).
+    if (dropper::IsOpen()) in.dt_seconds = 0.0f;
     Lap(kPartInput);
     // Skate steps at 60 Hz on the same game time: GTA's moving entities are
     // gathered on the frames a step falls due, as fresh as before, not on
@@ -2067,12 +2090,16 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     s.dynamicDue = (std::min)(s.dynamicDue + in.dt_seconds, 1.0f);
     const bool gather = s.dynamicDue >= kStep;
     if (gather) s.dynamicDue = (std::min)(s.dynamicDue - kStep, kStep);
+    // Object Dropper: a picked object spawns once its model is in.
+    dropper::Tick(s.last.skater_position, s.facing);
+    s.world.SetPlaced(dropper::Objects());
     if (cfg.dynamicWorld && gather) {
         // Moving GTA entities near the skater, for Skate's contact code.
         s.world.SetPedParts(cfg.pedHitboxes);
         s.world.SetPedLaunch(cfg.pedLaunch, cfg.pedLaunchScale, cfg.pedLaunchLift, cfg.pedLaunchSpin);
         s.world.SetPedVoices(cfg.pedPain, cfg.pedGetUpSpeech);
         s.world.SetVehicleDamage(cfg.vehicleDamage, cfg.vehicleDamageScale, cfg.vehicleDamageMin, cfg.vehicleDamageRadius);
+        s.world.SetIgnored(dropper::Ghost());
         s.world.Gather(s.ped, s.last.board_position, cfg.dynamicRadius, boardnative::Entity());
         if (const std::string line = s.world.TakePositionLog(); !line.empty()) Log(line.c_str());
         const auto& bodies = s.world.Bodies();
@@ -2282,6 +2309,7 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     const bool nativeBoard = cfg.drawBoard && g_runtime.BoardPose(boardPose)
         && boardnative::Tick(true, boardPose);
     if (!cfg.drawBoard || boardPose.bone_count != 7) boardnative::Tick(false, SvBoardPose{});
+    npcskaters::Tick(true, s.last.skater_position, in.dt_seconds);
     BoardWeather(s, cfg, nativeBoard ? &boardPose : nullptr);
     if (cfg.drawSkater && !nativeBoard) DrawBoardMesh();
     if (g_quirkRequested.exchange(false) && cfg.backwardsMan) g_runtime.TriggerQuirk(0);
@@ -2447,7 +2475,10 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
         // whole pose, and these checks need only its status and tick.
         const SvOutput& o = s.last;
         const bool dead = Call<BOOL>(gta::IS_ENTITY_DEAD, s.ped, 0);
-        if (o.tick != s.watchTick) s.watchTick = o.tick, s.watchSince = now, s.watchFrames = 0;
+        // Skate holds still on purpose while the Object Dropper is open (UpdateActive steps it
+        // with dt 0): that is not a stall (2026-10-15: picking an object for 5 s threw the
+        // player off the board as "Skate stopped responding").
+        if (o.tick != s.watchTick || dropper::IsOpen()) s.watchTick = o.tick, s.watchSince = now, s.watchFrames = 0;
         const bool stalled = ++s.watchFrames > 120 && now - s.watchSince > 5000;
         if (o.status == SV_STATUS_ERROR) {
             Leave(s, cfg, "runtime error", false);
@@ -2603,6 +2634,15 @@ std::vector<menu::Page> MenuPages(Session& s) {
                Bound("Snow")),
     }});
 
+    // Skate 3's «Park crossbar: Skate 3's own lots from the disc (park_lot.h); LB + B builds in them.
+    pages.push_back({"skate.Park", {
+        Action("Enter Team HQ", [] { parklot::Enter(0); }),
+        Action("Enter Hartley Stadium", [] { parklot::Enter(1); }),
+        Action("Save Park", [] { parklot::Save(); }),
+        Action("Load Park", [] { parklot::Load(); }),
+        Action("Exit Park", [] { parklot::Exit(); }),
+    }});
+
     pages.push_back({"Hall of Meat and records", {
         Flag("Hall of Meat", "HallOfMeat", D.hallOfMeat, [&s](const std::string& v) {
             const bool on = std::atof(v.c_str()) != 0.0;
@@ -2696,6 +2736,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
 
 void ScriptMain() {
     Log("SkateV Legacy: ScriptMain start");
+    dropper::SetLog(Log);
+    dropper::SetPresenter([](const SvObjectDropper& d) { return g_runtime.SetObjectDropper(d); });
     {
         // Other script mods loaded alongside, for attributing hitches.
         std::string asis;
@@ -2787,6 +2829,12 @@ void ScriptMain() {
          cfg.life.inMissions ? "allowed" : "blocked", cfg.life.backgroundPrepare ? "on" : "off");
     Session s;
     g_hallOfMeatOn = cfg.hallOfMeat;
+    parklot::Start(Log, [&s](const std::string& text) { Notify(s, text, 4000); }, g_logDir + L"parks\\",
+                   (std::filesystem::u8path(cfg.dataRoot) / L"private" / L"parks" / L"parks.txt").wstring());
+    parklot::SetObjects([] { return dropper::Objects(); });
+    parklot::SetRestore([](const parklot::Placed& p) {
+        return dropper::Restore(p.model, {p.pos[0], p.pos[1], p.pos[2]}, {p.rot[0], p.rot[1], p.rot[2]});
+    });
     menu::Start(g_gameDir + L"SkateVLegacy.ini", MenuPages(s), RawPadButtons, Log);
     FrameMonitor monitor;
     stall::SetLog(Log);
@@ -2858,6 +2906,8 @@ void ScriptMain() {
         if (!s.message.empty() && GetTickCount() < s.messageUntil) {
             Text(s.message.c_str(), 0.5f, 0.88f, 0.4f, 255, 255, 255, true);
         }
+        if (s.state == LifeState::Skating) dropper::Draw();
+        else dropper::Close();
         hudoverlay::Tick(s.state == LifeState::Skating);
         Lap(kPartHud);
         const auto raw = static_cast<std::uint16_t>(RawPadButtons());
@@ -2874,10 +2924,12 @@ void ScriptMain() {
             else menu::Toggle();
         }
         menu::Tick();
+        parklot::Tick(SkateOwnsPlayer(s), menu::IsOpen() || dropper::IsOpen());
         Lap(kPartMenu);
         recordsui::Tick(s.state == LifeState::Skating,
                         g_hallOfMeatOn && std::string_view(s.last.state_utf8).rfind("Wipeout", 0) == 0);
         if (s.state != LifeState::Skating) boardnative::Tick(false, SvBoardPose{}), boardstencil::SetActive(false);
+        if (s.state != LifeState::Skating) npcskaters::Tick(false, SvVec3{}, 0.0f);
         Lap(kPartRecords);
         gtaaudio::Tick(s.state == LifeState::Skating);
         Lap(kPartAudio);

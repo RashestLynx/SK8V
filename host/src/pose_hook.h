@@ -45,4 +45,13 @@ struct ApplyTime {
     unsigned calls;
 };
 ApplyTime TakeApplyTime();
+
+// NPC skaters (npc_skaters.cpp), script thread: ped `entity` in NPC slot
+// `slot` wears the poses published for it (bone world matrices, as
+// PublishPose), written after GTA's pass like the player's. UninstallNpc
+// before the ped is deleted.
+constexpr int kMaxNpcs = 4;
+bool InstallNpc(int slot, std::uintptr_t entity, const probe::SkeletonInfo& skeleton, void (*log)(const char*));
+void UninstallNpc(int slot, void (*log)(const char*));
+void PublishNpcPose(int slot, const float* bones, int count);
 } // namespace posehook

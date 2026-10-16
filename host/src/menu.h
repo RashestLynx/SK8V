@@ -165,6 +165,7 @@ constexpr const char* kHint = "Left/Right change   Back: categories   * restart 
 inline std::string PageHint(const std::string& title) {
     static const std::pair<const char*, const char*> kHints[] = {
         {"Skating", "Skate on or off, stance and the core Skate rules."},
+        {"skate.Park", "Skate 3's park lots (markers by the LSIA hangar): enter, build with LB + B, save, load, exit."},
         {"Hall of Meat and records", "Hall of Meat bail records and the records display."},
         {"Peds and vehicles", "Collision, launch and dent settings for pedestrians and vehicles."},
         {"BackwardsMan", "BackwardsMan trick model, direction and remount."},

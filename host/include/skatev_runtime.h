@@ -629,6 +629,39 @@ struct SvDynamicBody {
     std::uint32_t grab_flags;
 };
 static_assert(sizeof(SvDynamicBody) == 144);
+
+// ---- object dropper (optional export, ABI 8) ----
+// Skate 3's Object Dropper screen (its `objectdropper` movie, prepared by
+// tools/prepare-hom-hud.py --movie objectdropper into <DataRoot>/private/
+// hud-dropper), run by the runtime HUD from what the host sends every frame
+// while the dropper is open (and once, hidden, when it closes).
+// `mode` is an index into retail's FEObjectDropperScreenMode list
+// (skate_hud::dropper::MODES: 0 Catalog, 3 GotoItems, 4 GotoSubCategories,
+// 7 Manipulate, 9 NextCategory, 10 NextItem, 11 NextSubCategory,
+// 12 PreviousCategory, 13 PreviousItem, 14 PreviousSubCategory, 15 Refresh,
+// 16 RefreshDuplicate, 18 RefreshFineTune, 24 ShowSelection, ...); it is
+// applied when `mode_serial` changes. `lists_utf8`: the tabs, the current
+// tab's categories, their descriptions and the current category's items:
+// four groups split by '\x1e', entries by '\x1f'.
+// Export: sv_set_object_dropper(rt, &dropper) -> 1 when the runtime shows
+// the screen (0: not prepared; the host draws its own list).
+enum SvObjectDropperFlags : std::uint32_t {
+    SV_DROPPER_CHOOSING_CATEGORY = 1u << 0,
+    SV_DROPPER_PLACING = 1u << 1,
+    SV_DROPPER_DUPLICATE = 1u << 2,
+    SV_DROPPER_FINE_TUNE = 1u << 3,
+};
+struct SvObjectDropper {
+    std::uint32_t size;
+    std::uint32_t visible;
+    std::uint32_t mode;
+    std::uint32_t mode_serial;
+    std::uint32_t tab, category, item;
+    std::uint32_t flags;
+    const char* lists_utf8;
+};
+static_assert(sizeof(SvObjectDropper) == 40);
+using SvSetObjectDropperFn = std::uint32_t(__cdecl*)(void*, const SvObjectDropper*);
 using SvSetDynamicBodiesFn = std::uint32_t(__cdecl*)(void*, const SvDynamicBody*, std::uint32_t);
 
 // Contact exchange: impulse the board/skater applied to a host entity in one
@@ -682,3 +715,30 @@ static_assert(sizeof(SvBoardPose) == 528);
 static_assert(offsetof(SvBoardPose, entity) == 16);
 static_assert(offsetof(SvBoardPose, world) == 80);
 using SvGetBoardPoseFn = std::uint32_t(__cdecl*)(const void*, SvBoardPose*);
+
+// ---- NPC skaters (optional exports, ABI 8) ----
+// Ambient skaters riding their own Skate sessions near the player (runtime
+// npc_pool.rs). sv_npc_configure(rt, count, ped_cache_root): 0..4 skaters,
+// models from the ped cache (sessions build in the background, ~10 s each).
+// sv_npc_frame(rt, dt, &player, active) once per frame; they ride only while
+// `active`. sv_npc_get(rt, index, &npc, bones, capacity) -> 1 when written:
+// flags bit 0 riding; the host shows a ped of `model_hash` at `position`
+// (Skate's root, as SvOutput::skater_position) posed by `bone_count` bone world
+// matrices (16 floats, RAGE rows, the model's bone order) and the board.
+// `generation` changes on every respawn.
+struct SvNpc {
+    std::uint32_t size, flags, model_hash, generation;
+    std::uint64_t tick;
+    SvVec3 position;
+    float heading_degrees;
+    SvVec3 velocity;
+    std::uint32_t bone_count;
+    char state_utf8[32];
+    SvBoardPose board;
+};
+static_assert(sizeof(SvNpc) == 616);
+static_assert(offsetof(SvNpc, state_utf8) == 56);
+static_assert(offsetof(SvNpc, board) == 88);
+using SvNpcConfigureFn = std::uint32_t(__cdecl*)(void*, std::uint32_t, const char*);
+using SvNpcFrameFn = std::uint32_t(__cdecl*)(void*, float, const SvVec3*, std::uint32_t);
+using SvNpcGetFn = std::uint32_t(__cdecl*)(const void*, std::uint32_t, SvNpc*, float*, std::uint32_t);

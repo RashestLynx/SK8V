@@ -106,6 +106,24 @@ gunpose::Spine g_spine; // resolved on Install
 M g_gtaPose[kMaxBones];
 bool g_gtaValid = false;
 
+// NPC skaters (npc_skaters.cpp): their peds wear the poses of their own Skate
+// sessions the same way, without fades, gun or live clip. Each has a private
+// copy of its ped's table; the slot calls GTA's pass and then writes.
+struct Npc {
+    std::atomic<std::uintptr_t> entity{0}, skeleton{0}, locals{0};
+    std::uintptr_t originalTable = 0;
+    std::uintptr_t* copy = nullptr; // kept for the process once made
+    PoseBuffer buffers[3];
+    std::atomic<int> latest{-1};
+};
+Npc g_npcs[kMaxNpcs];
+SlotFn g_npcOriginal = nullptr;
+bool AnyNpc() {
+    for (const Npc& n : g_npcs)
+        if (n.entity.load(std::memory_order_relaxed)) return true;
+    return false;
+}
+
 // Skate's world pose -> entity-relative object matrices.
 bool ToObjects(const float* pose, int count, std::uintptr_t parent, M* object) {
     M entityInv;
@@ -218,6 +236,34 @@ void Apply(std::uintptr_t s, bool fresh = false) {
     if (compare) liveclip::EndCompare();
 }
 
+void ApplyNpc(Npc& n, std::uintptr_t s) {
+    const std::uintptr_t data = *reinterpret_cast<const std::uintptr_t*>(s + 0x00);
+    const std::uintptr_t locals = *reinterpret_cast<const std::uintptr_t*>(s + 0x10);
+    const std::uintptr_t objects = *reinterpret_cast<const std::uintptr_t*>(s + 0x18);
+    const int count = *reinterpret_cast<const int*>(s + 0x20);
+    if (!data || !locals || !objects || count <= 0 || count > kMaxBones) return;
+    const auto* parents = *reinterpret_cast<const std::int16_t* const*>(data + 0x38);
+    const int latest = n.latest.load(std::memory_order_acquire);
+    if (!parents || latest < 0) return;
+    const PoseBuffer& buffer = n.buffers[latest];
+    if (buffer.count != count) return;
+    const M* object = reinterpret_cast<const M*>(buffer.bones);
+    for (int i = 0; i < count; ++i) {
+        StoreXyz(objects + 64 * i, object[i]);
+        StoreXyz(locals + 64 * i, LocalOf(object, parents, i, count));
+    }
+}
+
+bool __fastcall NpcSlot(std::uintptr_t self, bool flag) {
+    const bool result = g_npcOriginal(self, flag);
+    for (Npc& n : g_npcs) {
+        if (n.entity.load(std::memory_order_relaxed) != self) continue;
+        const std::uintptr_t s = n.skeleton.load(std::memory_order_acquire);
+        if (s) ApplyNpc(n, s);
+    }
+    return result;
+}
+
 // Time spent in Apply (VerboseLog): [0] GTA's main thread, [1] its anim workers.
 std::atomic<long long> g_applyTicks[2]{};
 std::atomic<unsigned> g_applyCalls{0};
@@ -238,6 +284,13 @@ std::uintptr_t __fastcall JobWrap(std::uintptr_t params, std::uintptr_t b, std::
     if (s && params) {
         const std::uintptr_t locals = *reinterpret_cast<const std::uintptr_t*>(s + 0x10);
         if (locals && *reinterpret_cast<const std::uintptr_t*>(params + job.localsOffset) == locals) TimedApply(s, Index == 0, 1);
+    }
+    if (params) {
+        const std::uintptr_t mine = *reinterpret_cast<const std::uintptr_t*>(params + job.localsOffset);
+        for (Npc& n : g_npcs) {
+            const std::uintptr_t ns = n.skeleton.load(std::memory_order_acquire);
+            if (ns && mine && n.locals.load(std::memory_order_relaxed) == mine) ApplyNpc(n, ns);
+        }
     }
     return result;
 }
@@ -404,7 +457,7 @@ void Uninstall(void (*log)(const char*)) {
     g_fadeDir = 0;
     g_gunDir = -1, g_gunStart = 0, g_gunMs = 1; // no gun share left for the next session
     g_haveWritten = false;
-    UninstallJobs(log);
+    if (!AnyNpc()) UninstallJobs(log); // NPC peds still need them
     if (!g_entity) return;
     auto* const slot0 = reinterpret_cast<std::atomic<std::uintptr_t>*>(g_entity);
     if (slot0->load() == reinterpret_cast<std::uintptr_t>(g_copy + 1)) slot0->store(g_originalTable);
@@ -460,5 +513,65 @@ void FadeIn(int ms) {
 }
 
 bool FadeOutDone() { return g_fadeDir.load() < 0 && (g_outDone.load() || SkateWeight() <= 0.0f); }
+
+bool InstallNpc(int slot, std::uintptr_t entity, const probe::SkeletonInfo& skeleton, void (*log)(const char*)) {
+    if (slot < 0 || slot >= kMaxNpcs || !entity || !skeleton.skeleton) return false;
+    Npc& n = g_npcs[slot];
+    n.locals.store(*reinterpret_cast<const std::uintptr_t*>(skeleton.skeleton + 0x10), std::memory_order_relaxed);
+    n.skeleton.store(skeleton.skeleton, std::memory_order_release);
+    if (n.entity.load() == entity) return true;
+    if (n.entity.load()) UninstallNpc(slot, log);
+    n.skeleton.store(skeleton.skeleton, std::memory_order_release);
+    n.locals.store(*reinterpret_cast<const std::uintptr_t*>(skeleton.skeleton + 0x10), std::memory_order_relaxed);
+    const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    const std::uintptr_t table = *reinterpret_cast<const std::uintptr_t*>(entity);
+    const std::uintptr_t original = reinterpret_cast<const std::uintptr_t*>(table)[kSlot];
+    if (original != base + kSlotRva) {
+        log("pose hook: an NPC ped's vtable slot 65 differs; it keeps GTA's animation");
+        n.skeleton.store(0);
+        return false;
+    }
+    if (!n.copy) {
+        n.copy = static_cast<std::uintptr_t*>(
+            VirtualAlloc(nullptr, sizeof(std::uintptr_t) * (kCopiedSlots + 1), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!n.copy) return false;
+    }
+    std::memcpy(n.copy, reinterpret_cast<const void*>(table - sizeof(std::uintptr_t)), sizeof(std::uintptr_t) * (kCopiedSlots + 1));
+    g_npcOriginal = reinterpret_cast<SlotFn>(original);
+    n.copy[1 + kSlot] = reinterpret_cast<std::uintptr_t>(&NpcSlot);
+    n.latest.store(-1, std::memory_order_release);
+    n.originalTable = table;
+    n.entity.store(entity, std::memory_order_release);
+    reinterpret_cast<std::atomic<std::uintptr_t>*>(entity)->store(reinterpret_cast<std::uintptr_t>(n.copy + 1));
+    InstallJobs(log);
+    return true;
+}
+
+void UninstallNpc(int slot, void (*log)(const char*)) {
+    if (slot < 0 || slot >= kMaxNpcs) return;
+    Npc& n = g_npcs[slot];
+    n.skeleton.store(0, std::memory_order_release);
+    n.locals.store(0, std::memory_order_relaxed);
+    const std::uintptr_t entity = n.entity.exchange(0);
+    if (entity) {
+        auto* const slot0 = reinterpret_cast<std::atomic<std::uintptr_t>*>(entity);
+        if (slot0->load() == reinterpret_cast<std::uintptr_t>(n.copy + 1)) slot0->store(n.originalTable);
+    }
+    if (!g_entity && !AnyNpc()) UninstallJobs(log);
+}
+
+void PublishNpcPose(int slot, const float* bones, int count) {
+    if (slot < 0 || slot >= kMaxNpcs) return;
+    Npc& n = g_npcs[slot];
+    count = std::min(count, kMaxBones);
+    const std::uintptr_t s = n.skeleton.load(std::memory_order_acquire);
+    if (!s) return;
+    const std::uintptr_t parent = *reinterpret_cast<const std::uintptr_t*>(s + 0x08);
+    if (!parent || *reinterpret_cast<const int*>(s + 0x20) != count) return;
+    const int next = (n.latest.load(std::memory_order_relaxed) + 1) % 3;
+    if (!ToObjects(bones, count, parent, reinterpret_cast<M*>(n.buffers[next].bones))) return;
+    n.buffers[next].count = count;
+    n.latest.store(next, std::memory_order_release);
+}
 
 } // namespace posehook

@@ -15,12 +15,16 @@
 //! station when the host changes it on the board (`sv_show_radio`), top-left,
 //! with the station's own logo in place of the EA logo when
 //! tools/prepare-hom-hud.py --movie chyron --gta exported the logos.
+//!
+//! Skate's session-marker quick menu (`skate_hud::marker`) shows while LB is
+//! held, from the session marker's state after each tick (overlay patch 0050
+//! `Session::marker_hud`).
 use crate::hom::TickOutput;
 use crate::worker::{Log, Shared};
 use skate_hud::hom::state;
 use skate_hud::layout::{DEFAULT_MAX_ASPECT, Layout};
 use skate_hud::player::Texture;
-use skate_hud::{AnalyserPlayer, Assets, ChyronPlayer, Frame, HomPlayer, Player, ScoreInput};
+use skate_hud::{AnalyserPlayer, Assets, ChyronPlayer, Frame, HomPlayer, MarkerHud, MarkerState, Player, ScoreInput};
 use std::ffi::c_void;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -115,7 +119,32 @@ pub struct HudShared {
     /// Pending radio banner (`sv_show_radio`): the three lines, then the
     /// station id for its logo (GET_RADIO_STATION_NAME).
     pub radio: Option<[String; 4]>,
+    /// Skate 3's Object Dropper screen is loaded (`sv_set_object_dropper`).
+    pub dropper_available: bool,
 }
+
+/// What the host's Object Dropper shows (`sv_set_object_dropper`).
+pub struct DropperUi {
+    pub visible: bool,
+    /// Index into `skate_hud::dropper::MODES`, applied when `serial` changes.
+    pub mode: u32,
+    pub serial: u32,
+    pub state: skate_hud::DropperState,
+}
+
+/// Skate 3's Object Dropper movie, run while the host's dropper is open. It
+/// plays on wall time (the skater is paused meanwhile, so no Skate ticks).
+struct DropperMenu {
+    assets: Arc<Assets>,
+    texture_base: u32,
+    player: Option<skate_hud::DropperPlayer>,
+    serial: Option<u32>,
+    clock: Option<std::time::Instant>,
+    frames: f32,
+}
+
+/// The dropper movie's timeline rate (the HUD movies step with Skate's ticks).
+const DROPPER_FPS: f32 = 60.0;
 
 /// Skate's scorer -> the movie input (field-for-field; see patch 0010).
 pub fn score_input(h: &skate_host::bridge::hud::HudInput) -> ScoreInput {
@@ -224,6 +253,12 @@ struct AnalyserMovie {
     path: Vec<[f32; 2]>,
 }
 
+struct MarkerMenu {
+    hud: MarkerHud,
+    texture_base: u32,
+    state: MarkerState,
+}
+
 /// `<dir>/logos/logos.json`: [{"id", "file", "width", "height"}] (RGBA8).
 fn station_logos(dir: &Path) -> Vec<(String, Texture)> {
     let Ok(text) = std::fs::read(dir.join("logos").join("logos.json")) else {
@@ -256,6 +291,8 @@ pub struct Driver {
     hom: Option<HomMovie>,
     chyron: Option<ChyronMovie>,
     analyser: Option<AnalyserMovie>,
+    marker: Option<MarkerMenu>,
+    dropper: Option<DropperMenu>,
 }
 
 impl Driver {
@@ -367,6 +404,33 @@ impl Driver {
                 None
             }
         };
+        let dir = MarkerHud::dir_for(data_root);
+        let marker = match MarkerHud::load(&dir) {
+            Ok(hud) => {
+                let texture_base = textures.len() as u32;
+                textures.extend(hud.textures.iter().cloned());
+                log(&format!("session marker menu loaded from {} ({} textures)", dir.display(), hud.textures.len()));
+                Some(MarkerMenu { hud, texture_base, state: MarkerState::default() })
+            }
+            Err(e) => {
+                log(&format!("session marker menu unavailable ({e}); run tools/convert-skate-data.py --exports hud --incremental"));
+                None
+            }
+        };
+        let dir = Assets::dropper_dir_for(data_root);
+        let dropper = match Assets::load_dropper(&dir) {
+            Ok(a) => {
+                let texture_base = textures.len() as u32;
+                textures.extend(a.textures.iter().cloned());
+                log(&format!("Object Dropper screen loaded from {} ({} textures)", dir.display(), a.textures.len()));
+                Some(DropperMenu { assets: Arc::new(a), texture_base, player: None, serial: None, clock: None, frames: 0.0 })
+            }
+            Err(e) => {
+                log(&format!("Object Dropper screen unavailable ({e}); run tools/prepare-hom-hud.py --movie objectdropper"));
+                None
+            }
+        };
+        shared.lock().unwrap().hud.dropper_available = dropper.is_some();
         if !textures.is_empty() {
             let mut s = shared.lock().unwrap();
             s.hud.textures = Arc::new(textures);
@@ -380,7 +444,58 @@ impl Driver {
             hom,
             chyron,
             analyser,
+            marker,
+            dropper,
         }
+    }
+
+    /// The host's Object Dropper changed (sent every frame while it is open):
+    /// the movie gets the data, the mode when its serial moves, its frames on
+    /// wall time, and the scene is published at once (Skate is paused, so
+    /// no tick publishes it).
+    pub fn dropper(&mut self, ui: DropperUi, shared: &Mutex<Shared>, log: &Log) {
+        let Some(d) = self.dropper.as_mut() else { return };
+        if !ui.visible {
+            if d.player.take().is_some() {
+                d.serial = None;
+                d.clock = None;
+                self.publish(shared, log);
+            }
+            return;
+        }
+        if d.player.is_none() {
+            match skate_hud::DropperPlayer::new(&d.assets) {
+                Ok(p) => d.player = Some(p),
+                Err(e) => {
+                    log(&format!("Object Dropper screen stopped: {e}"));
+                    self.dropper = None;
+                    shared.lock().unwrap().hud.dropper_available = false;
+                    return;
+                }
+            }
+        }
+        let p = d.player.as_mut().unwrap();
+        p.set_data(&ui.state);
+        let mut result = Ok(());
+        if d.serial != Some(ui.serial) {
+            d.serial = Some(ui.serial);
+            if let Some(mode) = skate_hud::dropper::MODES.get(ui.mode as usize) {
+                result = p.mode(mode);
+            }
+        }
+        let now = std::time::Instant::now();
+        d.frames = (d.frames + d.clock.map_or(1.0, |c| (now - c).as_secs_f32() * DROPPER_FPS)).min(8.0);
+        d.clock = Some(now);
+        while result.is_ok() && d.frames >= 1.0 {
+            d.frames -= 1.0;
+            result = p.advance();
+        }
+        if let Err(e) = result {
+            log(&format!("Object Dropper screen stopped: {e}"));
+            self.dropper = None;
+            shared.lock().unwrap().hud.dropper_available = false;
+        }
+        self.publish(shared, log);
     }
 
     fn enabled(&self, shared: &Mutex<Shared>) -> bool {
@@ -391,6 +506,9 @@ impl Driver {
     pub fn activate(&mut self, s: &skate_host::bridge::Session, shared: &Mutex<Shared>, log: &Log) {
         self.player = None;
         self.layout = None;
+        if let Some(m) = self.marker.as_mut() {
+            m.state = MarkerState::default();
+        }
         let hud_on = shared.lock().unwrap().hud.viewport.flags & 1 != 0;
         if let Some(m) = self.hom.as_mut().filter(|m| !m.failed) {
             m.show = HomShow::default();
@@ -443,6 +561,11 @@ impl Driver {
     ) {
         self.tick_radio(shared, log);
         self.tick_analyser(s, right_stick, shared, log);
+        if let Some(m) = self.marker.as_mut() {
+            let h = s.marker_hud();
+            // The host's Object Dropper (LB + B) ships with this runtime.
+            m.state = MarkerState { visible: h.visible, can_place: h.can_place, can_return: h.can_return, can_drop: true };
+        }
         if let Some(p) = self.player.as_mut() {
             if let Err(e) = p.update(&score_input(&s.hud_input())) {
                 self.fail(&e, log);
@@ -619,6 +742,24 @@ impl Driver {
                 }
             }
         }
+        let mut dropper_frame = None;
+        if let (Some(d), Some(l)) = (self.dropper.as_ref(), layout) {
+            if let Some(p) = d.player.as_ref() {
+                match p.frame(&d.assets, &l) {
+                    Ok(f) => dropper_frame = Some((f, d.texture_base)),
+                    Err(e) => log(&format!("Object Dropper frame: {e}")),
+                }
+            }
+        }
+        // Drawn last, over the other movies; below the radio banner while it
+        // shows. The dropper screen replaces it (both are LB + B's).
+        let marker_frame = match (self.marker.as_ref(), layout) {
+            (Some(m), Some(l)) if m.state.visible && dropper_frame.is_none() => {
+                let below = chyron_frame.as_ref().and_then(|(f, _)| skate_hud::marker::visible_bottom(f));
+                Some((m.hud.frame(m.state, &l, below.map(|b| b + 0.01 * l.height as f32)), m.texture_base))
+            }
+            _ => None,
+        };
         let mut frame = None;
         if let (Some(p), Some(l), Some(a)) = (self.player.as_mut(), layout, self.assets.as_ref()) {
             if self.layout != Some(l) {
@@ -636,7 +777,7 @@ impl Driver {
                 Err(e) => self.fail(&e, log),
             }
         }
-        for (h, base) in hom_frame.into_iter().chain(chyron_frame).chain(analyser_frame) {
+        for (h, base) in hom_frame.into_iter().chain(chyron_frame).chain(analyser_frame).chain(marker_frame).chain(dropper_frame) {
             let mut f = frame.unwrap_or_else(|| Frame { layout: h.layout, ..Default::default() });
             append_frame(&mut f, &h, base);
             frame = Some(f);
@@ -665,6 +806,14 @@ impl Driver {
             a.player = None;
             a.shown_at = None;
             a.path.clear();
+        }
+        if let Some(m) = self.marker.as_mut() {
+            m.state = MarkerState::default();
+        }
+        if let Some(d) = self.dropper.as_mut() {
+            d.player = None;
+            d.serial = None;
+            d.clock = None;
         }
         let mut s = shared.lock().unwrap();
         s.hud.serial += 1;

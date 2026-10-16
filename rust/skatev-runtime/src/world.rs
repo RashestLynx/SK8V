@@ -31,6 +31,8 @@ pub struct Area {
     /// Triangles new or gone since the last build (`reuse`); None: built
     /// from scratch.
     pub changed: Option<usize>,
+    /// Keys (`HostBody::placed_key`) of the dropped props built in.
+    pub placed: Vec<u64>,
 }
 
 pub struct StaticWorld {
@@ -47,6 +49,10 @@ pub struct StaticWorld {
     /// centre only: kept for rebuilds in place.
     sidecars_at: Option<[f32; 2]>,
     recovered_area: std::collections::HashMap<u64, svwc::surfaces::Surface>,
+    /// Props the host's Object Dropper put down (GTA world space) and their
+    /// keys: built in with the map, so their lips become grind rails.
+    placed: Vec<svwc::Tri>,
+    placed_keys: Vec<u64>,
 }
 
 impl StaticWorld {
@@ -60,7 +66,15 @@ impl StaticWorld {
             reuse: Default::default(),
             sidecars_at: None,
             recovered_area: Default::default(),
+            placed: Vec::new(),
+            placed_keys: Vec::new(),
         }
+    }
+
+    /// The dropped props the next builds include (replaces the last set).
+    pub fn set_placed(&mut self, keys: Vec<u64>, triangles: Vec<svwc::Tri>) {
+        self.placed_keys = keys;
+        self.placed = triangles;
     }
 
     /// Where GTA's loaded collision is (None: it is not available).
@@ -83,9 +97,13 @@ impl StaticWorld {
     pub fn around(&mut self, center: Vec3) -> Result<Area, String> {
         let level = self.live.ok_or("GTA's loaded collision (its physics level) has not been found yet")?;
         let read = std::time::Instant::now();
-        let (tris, census, bounds) = level.walk([center.x, center.y], RADIUS)?;
+        let (mut tris, census, bounds) = level.walk([center.x, center.y], RADIUS)?;
         let walked = read.elapsed();
         let mut note = census.to_string();
+        if !self.placed_keys.is_empty() {
+            tris.extend_from_slice(&self.placed);
+            note.push_str(&format!("; {} dropped props ({} triangles)", self.placed_keys.len(), self.placed.len()));
+        }
         let p = [center.x, center.y];
         if !tris.iter().any(|t| svwc::clean::floor_at(t, p).is_some_and(|z| (z - center.z).abs() < 4.0)) {
             note.push_str(&format!("; NO FLOOR under ({:.1}, {:.1}, {:.1}): {}", p[0], p[1], center.z, level.under(p).unwrap_or_else(|e| e)));
@@ -126,6 +144,7 @@ impl StaticWorld {
         ));
         area.note = note;
         area.bounds = bounds;
+        area.placed = self.placed_keys.clone();
         Ok(area)
     }
 }
@@ -197,6 +216,7 @@ pub fn build_area_reusing(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3
         note: String::new(),
         bounds: Vec::new(),
         changed: dirty.compared().then_some(dirty.changed),
+        placed: Vec::new(),
     }
 }
 

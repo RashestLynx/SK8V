@@ -36,7 +36,9 @@ STEPS = {'disc': (20, 'Reading the Skate 3 disc'), 'convert': (17, 'Converting S
          'board': (1, 'Preparing the board'), 'trick-analyser': (1, 'Preparing the Trick Analyzer'), 'gta-vehicles': (3, 'Reading GTA V vehicles'),
          'world': (30, 'Building world collision'), 'peds': (5, 'Reading GTA V characters'), 'live-clip': (4, 'Building the board animation pack'),
          'wheel-icon': (2, 'Adding the weapon wheel icon'), 'board-native': (3, 'Building the GTA board model'),
-         'ped-colliders': (2, 'Building character collision'), 'verify': (1, 'Checking the prepared data'),
+         'ped-colliders': (2, 'Building character collision'), 'dropper': (2, 'Building the Skate 3 dropper objects'),
+         'parks': (2, 'Building the Skate 3 skate.Park lots'),
+         'verify': (1, 'Checking the prepared data'),
          'install': (5, 'Installing into the GTA folder')}
 PACKAGE = REPO / 'build/package'
 # Dev-baked material and ground-joint sidecars shipped with the release (DECISIONS 2026-10-06).
@@ -44,6 +46,7 @@ SHIPPED_WORLD = REPO / 'world'
 SHADER_REFERENCE = ('x64w.rpf', 'dlcpacks/mppilot/dlc.rpf/x64/levels/gta5/props/mppilot_props.rpf/pil_p_para_bag_pilot_s.ydr')
 PED_COLLIDER_SOURCE = '88b90e3104464c947439c70764df617f9356ef4f048a3501368c4ab8a494f1b6'  # x64a.rpf z_z_fred.yft
 PACK = r'update\x64\dlcpacks\skatev'
+PARK = 'data/content/parkassets.big'  # Skate 3's Object Dropper objects (prepare-dropper.py)
 
 
 def binary(name):
@@ -99,8 +102,15 @@ class Prepare:
             ('board', 'skate', ['prepare-board.py'], lambda: py('prepare-board.py', '--assets', self.assets)),
             ('trick-analyser', 'skate', ['prepare-hom-hud.py'], lambda: py(
                 'prepare-hom-hud.py', '--game', self.disc, '--assets', self.assets, '--movie', 'trickanalyser')),
+            # Skate 3's Object Dropper screen (the runtime HUD draws it; LB + B)
+            ('dropper-screen', 'skate', ['prepare-hom-hud.py'], lambda: py(
+                'prepare-hom-hud.py', '--game', self.disc, '--assets', self.assets, '--movie', 'objectdropper')),
             ('board-native', 'join', ['prepare-board-native.py'], self.stage_board_native),
             ('ped-colliders', 'join', ['prepare-ped-colliders.py', 'ped_collider_templates.py'], self.stage_ped_colliders),
+            # join: after world, whose template index it adds to (a world rerun reruns it)
+            ('dropper', 'join', ['prepare-dropper.py'], self.stage_dropper),
+            # join: after live-clip, whose pack it adds the lots' map to (a live-clip rerun reruns it)
+            ('parks', 'join', ['prepare-park-lots.py', 'prepare-dropper.py'], self.stage_parks),
             ('gta-vehicles', 'gta', ['gta_extract.py', 'build-vehicle-masses.py'], self.stage_vehicles),
             ('world', 'gta', [], self.stage_world),
             ('peds', 'gta', ['gta_extract.py'], self.stage_peds),
@@ -124,6 +134,27 @@ class Prepare:
            '--lighting', self.assets / 'private/character-lighting.json',
            '--shader-reference', self.work / 'shader-reference' / path, '--rage', RAGE,
            '--out', self.assets / 'private/board-native')
+
+    def stage_dropper(self):
+        park = self.disc / PARK
+        if not park.is_file():  # read on its own: in xiso.NEEDED it would redo every stage of existing setups
+            if self.a.skate.is_dir():
+                raise SystemExit(f'{self.disc} is not an extracted Skate 3 disc: missing {PARK}')
+            disc = xiso.Disc(self.a.skate)
+            try:
+                disc.extract(PARK, park)
+            finally:
+                disc.close()
+        archive, path = SHADER_REFERENCE
+        gta_extract.extract(binary(RPF), self.keys, self.gta / archive, [path], self.work / 'shader-reference')
+        py('prepare-dropper.py', '--park', park, '--shader-reference', self.work / 'shader-reference' / path,
+           '--rage', RAGE, '--out', self.assets / 'private/dropper', '--world', self.world)
+
+    def stage_parks(self):
+        archive, path = SHADER_REFERENCE
+        gta_extract.extract(binary(RPF), self.keys, self.gta / archive, [path], self.work / 'shader-reference')
+        py('prepare-park-lots.py', '--skate', self.a.skate, '--shader-reference', self.work / 'shader-reference' / path,
+           '--rage', RAGE, '--pack', self.clip / 'dlc.rpf', '--out', self.out / 'parks', '--data', self.assets / 'private/parks')
 
     def stage_hom_hud(self):
         py('prepare-hom-hud.py', '--game', self.disc, '--assets', self.assets)
@@ -220,6 +251,13 @@ class Prepare:
         for kind in ('ydr', 'ytyp'):
             if sha256_file(board / f'skatev_board.{kind}') != receipt.get(f'{kind}_sha256'):
                 missing.append(f'native board {kind} does not match its receipt')
+        dropper = self.assets / 'private/dropper'
+        receipt = json.loads((dropper / 'receipt.json').read_text(encoding='utf-8'))
+        if sha256_file(dropper / receipt['ytyp']) != receipt['ytyp_sha256']:
+            missing.append('dropper ytyp does not match its receipt')
+        for o in receipt['objects']:
+            if sha256_file(dropper / f"{o['model']}.ydr") != o['ydr_sha256']:
+                missing.append(f"dropper object {o['model']}")
         manifest = json.loads((self.audio / 'manifest.json').read_text(encoding='utf-8'))
         if manifest.get('format') != 'skatev-audio-cache' or not manifest.get('complete'):
             missing.append('audio cache incomplete')
@@ -310,8 +348,10 @@ class Prepare:
         return progress
 
     def plan(self):
+        # The pack with the skate.Park lots' map (parks stage) when there is one, else live_clip's.
+        pack = self.out / 'parks/dlc.rpf' if (self.out / 'parks/dlc.rpf').is_file() else self.clip / 'dlc.rpf'
         files = {'SkateVLegacy.asi': PACKAGE / 'SkateVLegacy.asi', 'SkateVRuntime.dll': PACKAGE / 'SkateVRuntime.dll',
-                 PACK + r'\dlc.rpf': self.clip / 'dlc.rpf', PACK + r'\hud.gfx': self.clip / 'hud.gfx'}
+                 PACK + r'\dlc.rpf': pack, PACK + r'\hud.gfx': self.clip / 'hud.gfx'}
         return {'files': {k: str(v) for k, v in files.items()},
                 'ini': {'DataRoot': str(self.assets), 'WorldCache': str(self.world), 'AudioCache': str(self.audio),
                         'PedCache': str(self.peds), 'PedPoseCollision': 1, 'LiveClip': int(bool(self.clip_ok)),

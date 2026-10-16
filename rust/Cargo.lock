@@ -2743,6 +2743,7 @@ dependencies = [
  "serde_json",
  "skate-aems",
  "skate-core",
+ "skate-data",
  "skate-host",
  "skate-hud",
  "svwc",
