@@ -2113,6 +2113,7 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         std::vector<int> placed = dropper::Objects();
         placed.insert(placed.end(), parklot::Objects().begin(), parklot::Objects().end());
         s.world.SetPlaced(placed);
+        s.world.SetExcluded(&parklot::Layout());
     }
     if (cfg.dynamicWorld && gather) {
         // Moving GTA entities near the skater, for Skate's contact code.
@@ -2962,6 +2963,7 @@ void ScriptMain() {
          cfg.life.inMissions ? "allowed" : "blocked", cfg.life.backgroundPrepare ? "on" : "off");
     Session s;
     g_hallOfMeatOn = cfg.hallOfMeat;
+    dropper::SetDataRoot(std::filesystem::u8path(cfg.dataRoot).wstring());  // the lots' Skate 3 parks use its models
     parklot::Start(Log, [&s](const std::string& text) { Notify(s, text, 4000); }, g_logDir + L"parks\\",
                    (std::filesystem::u8path(cfg.dataRoot) / L"private" / L"parks" / L"parks.txt").wstring());
     parklot::SetObjects([] { return dropper::Objects(); });
@@ -3058,6 +3060,7 @@ void ScriptMain() {
             else menu::Toggle();
         }
         menu::Tick();
+        dropper::Prepare();
         parklot::Tick(SkateOwnsPlayer(s), menu::IsOpen() || dropper::IsOpen());
         // A skate.Park lot's pieces reach the runtime on foot too, twice a second, so its
         // static area already holds them when the board comes out (sent first as moving

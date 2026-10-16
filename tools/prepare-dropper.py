@@ -3,8 +3,8 @@ disc (data/content/parkassets.big). Nothing here is shipped: setup runs it on
 the player's PC.
 
     python tools/prepare-dropper.py --park <disc>/data/content/parkassets.big
-        --shader-reference <owned normal_spec .ydr> --rage build/tools/rage.exe
-        --out <assets>/private/dropper --world <world>/sk8v.svwc
+        --shader-reference <owned normal_spec .ydr> --decal-reference <owned normal_spec_decal .ydr>
+        --rage build/tools/rage.exe --out <assets>/private/dropper --world <world>/sk8v.svwc
 
 Source (owned disc): the dynamic recipe (recipe/dynamic/dynamic_db_*.xml) lists
 the dropper's objects in its <comp> groups, the static recipe (recipe/static/
@@ -18,6 +18,15 @@ channels name the texture RX2s.
 Output, per object (model sk3_<recipe name>):
 - <out>/<model>.ydr: render meshes (owned normal_spec shader schema, embedded
   textures) and Skate's collision as an embedded GTA bound (peds, vehicles).
+  Create-a-Park's environmentParkDecal materials lay a second texture (painted
+  stripes, metal copings) over the first with its own UVs (TEXCOORD0's second
+  half): those meshes are drawn twice, the second time a few millimetres out
+  with the decal texture in GTA's decal pass (owned normal_spec_decal schema).
+- With --layouts (data/big/miscload.big): the colours Skate 3's own parks
+  (data/skatepark/*.park) give their pieces: one tinted copy per piece and
+  colour, <model>_<rrggbb>.ydr, its base textures recoloured (the colour, with
+  the texture's light and dark), the decal layer as it is. Only the skate.Park
+  lots spawn them (prepare-park-lots.py); their collision is the piece's.
 - <out>/sk3_dropper.ytyp: one archetype per object; the host registers them.
 - <world>.prop-models/<hash>.svwc and the index line: the exact template the
   runtime builds into the static area (Skate collision, rails, lips).
@@ -58,6 +67,9 @@ ARCHETYPE_FLAGS = 0x20020  # as the native board: Legacy CREATE_OBJECT needs sou
 LOD_DISTANCE = 250
 # The recipe's placeholder (16x16) bound to channels a material does not use.
 PLACEHOLDER = 0x2F8315D75F82C2F1
+# X360 vertex element of Create-a-Park's decal meshes: TEXCOORD0 as four halves (base UV, decal UV).
+HALF4_TEXCOORD0 = bytes.fromhex('001a236000050006')
+DECAL_LIFT = 0.004  # metres the decal copy sits out from its surface (with GTA's decal depth bias)
 
 # GTA materials.dat indices (rust/skatev-runtime/src/materials.rs rows):
 # the template's material picks the rolling/grind sounds.
@@ -90,6 +102,9 @@ PARK_CATEGORIES = {
     'Misc': ('Catwalks & Misc', METAL), 'DownTown': ('Street Furniture', METAL), 'OTS': ('Landmarks', CONCRETE),
     'Branded': ('Branded', METAL), 'Foliage': ('Foliage', WOOD)}
 PARK_MARKERS = {'Teleports', 'Spawner'}
+# Skate 3's own parks the skate.Park lots hold (prepare-park-lots.py's LAYOUTS): their pieces get tinted copies.
+PARK_LAYOUTS = ('data/skatepark/industrial_fullpark.park', 'data/skatepark/megapark_fullpark.park')
+PARK_SINK = 0.015  # metres a dropped Create-a-Park piece sits into the ground (dropper_items.inc's floor)
 # Objects whose sloped faces set their facing (a ramp faces local -Y).
 SLOPED = {'an_DMO_UN_PicnicTableRamp'}
 SLOPED_GROUPS = {'DMO_Ramps', 'Vert', 'Street', 'Mega', 'PreMade'}
@@ -193,6 +208,16 @@ def recipes(archive):
     return objects, materials, paths
 
 
+def recipe_ids(archive):
+    """Recipe name -> the ids a saved park names it by (its <mod> id and its <lod> ids), both recipes."""
+    out = {}
+    for kind in ('dynamic', 'static'):
+        entry = next(e for e in archive.entries if re.search(rf'recipe/{kind}/{kind}_db_[^/]*\.xml$', e.path))
+        for mod in ET.fromstring(archive.read(entry)).iter('mod'):
+            out[mod.get('n')] = [mod.get('id').lower()] + [lod.get('id').lower() for lod in mod.findall('lod')]
+    return out
+
+
 def category(group):
     return CATEGORIES.get(group) or PARK_CATEGORIES[group]
 
@@ -286,9 +311,21 @@ class Textures:
             self.decoded[texture] = np.frombuffer(t[0].rgba, np.uint8).reshape(t[0].height, t[0].width, 4)
         return self.decoded[texture]
 
-    def name(self, channels, role, cutout):
-        """The texture name for a material channel; writes its PNG once."""
-        if role == 'nm' and channels.get('normal', PLACEHOLDER) == PLACEHOLDER:
+    def name(self, channels, role, cutout, tint=None):
+        """The texture name for a material channel; writes its PNG once. `tint` (r, g, b 0-255)
+        recolours a base texture as Skate 3's park editor does."""
+        if tint is not None and role in ('d', 'c'):
+            key = self.name(channels, role, cutout) + f'_{tint_hex(tint)}'
+            if key not in self.names:
+                base = np.asarray(Image.open(self.work / f'{key.rsplit("_", 1)[0]}.png'))
+                Image.fromarray(colourise(base, tint), 'RGBA').save(self.work / f'{key}.png')
+                self.names[key] = 'DiffuseSampler'
+            return key
+        if role == 'dc':  # the decal layer, its alpha kept
+            key, make = f'sk3_{channels["decal"]:016x}_dc', lambda: self.rgba(channels['decal'])
+        elif role == 's' and 'specular' not in channels:
+            key, make = 'sk3_flat_s', lambda: np.full((4, 4, 4), (48, 48, 48, 255), np.uint8)
+        elif role == 'nm' and channels.get('normal', PLACEHOLDER) == PLACEHOLDER:
             key, make = 'sk3_flat_nm', lambda: np.full((4, 4, 4), (128, 128, 255, 255), np.uint8)
         elif role == 'nm':
             key, make = f'sk3_{channels["normal"]:016x}_nm', lambda: self.opaque(self.rgba(channels['normal']))
@@ -318,6 +355,38 @@ class Textures:
     def opaque(image):
         image = image.copy(); image[:, :, 3] = 255
         return image
+
+
+def tint_hex(tint):
+    return ''.join(f'{c:02x}' for c in tint)
+
+
+def colourise(image, tint):
+    """Skate 3's piece colour: the colour itself, with the texture's own light and dark
+    (luminance over its mean); alpha kept."""
+    rgb = image[:, :, :3].astype(np.float64) / 255
+    lum = rgb @ [0.299, 0.587, 0.114]
+    detail = lum / max(float(lum.mean()), 1e-3)
+    out = np.clip(detail[:, :, None] * (np.array(tint, np.float64) / 255), 0, 1)
+    return np.dstack([np.round(out * 255).astype(np.uint8), image[:, :, 3]])
+
+
+def park_tints(miscload, archive):
+    """(recipe name, tint) for every coloured piece of Skate 3's own parks (white: as it is)."""
+    names = {i: name for name, ids in recipe_ids(archive).items() for i in ids}
+    parks = BigArchive(miscload)
+    out = set()
+    for entry in parks.entries:
+        if entry.path.lower() not in PARK_LAYOUTS:
+            continue
+        data = parks.read(entry)
+        count = struct.unpack_from('>I', data, 0x20)[0]
+        for at in range(0x40, min(0x40 + 48 * count, len(data) - 47), 48):
+            name = names.get(f'0x{struct.unpack_from(">Q", data, at)[0]:016x}')
+            tint = tuple(int(round(c * 255)) for c in struct.unpack_from('>3f', data, at + 8))
+            if name and tint != (255, 255, 255) and all(0 <= c <= 255 for c in tint):
+                out.add((name, tint))
+    return sorted(out)
 
 
 def bound_fields(parent, lo, hi, margin, material, poly_flags):
@@ -394,18 +463,29 @@ def write_svwc(path, tris, material, tile=64.0):
     path.write_bytes(out)
 
 
-def convert(archive, objects, materials, textures, template):
+def decal_uvs(raw, mesh):
+    """A decal mesh's second UVs: the last two halves of its four-half TEXCOORD0 (None without one)."""
+    for a in mesh.attributes:
+        if a.descriptor[4:12] == HALF4_TEXCOORD0:
+            n, stride = len(mesh.vertices), mesh.vertex_stride
+            rows = np.frombuffer(raw, np.uint8, n * stride, mesh.source_offsets['vertex_buffer']).reshape(n, stride)
+            return rows[:, a.offset + 4:a.offset + 8].copy().view('>f2').astype(np.float64)
+    return None
+
+
+def convert(archive, objects, materials, textures, template, decal_template=None):
     """Every object's GTA-space meshes, bound and drawable XML (no rage yet)."""
     models = {int(Path(e.path).stem, 16): e for e in archive.entries
               if re.search(r'/(dynamic|static)/model/', e.path) and e.path.endswith('.rx2')}
     results = []
-    for group, recipe, arena in objects:
+    for group, recipe, arena, *variant in objects:
+        tint = variant[0] if variant else None
         raw = archive.read(models[arena])
         parsed = parse_rx2(raw, strict=False)
         collision = decode_rx2_clustered_meshes(raw)
         if not parsed.meshes or not collision:
             raise ValueError(f'{recipe}: no mesh or collision')
-        meshes = []
+        meshes, decals = [], []
         for mesh in parsed.meshes:
             p = np.asarray(mesh.vertices, np.float64) @ C.T
             n = np.asarray(mesh.normals, np.float64) @ C.T if mesh.normals is not None else None
@@ -420,6 +500,11 @@ def convert(archive, objects, materials, textures, template):
                 n[bad] = around[bad]; n[bad & ~(np.linalg.norm(n, axis=1) > 1e-12)] = [0, 0, 1]
             n /= np.linalg.norm(n, axis=1, keepdims=True)
             meshes.append((p, n, np.asarray(mesh.uvs, np.float64), faces, mesh.name))
+            kind, channels = materials[int(mesh.name.rsplit('_0x', 1)[1], 16)]
+            if decal_template is not None and kind == 'environmentParkDecal' and 'decal' in channels:
+                second = decal_uvs(raw, mesh)
+                if second is not None:  # some meshes carry the material but one UV set: no decal to place
+                    decals.append((len(meshes) - 1, second, channels))
         # Skate drops its pipes upright and lets physics topple them; frozen, a
         # standing pipe is a pole. A rail far taller than wide lies on its side.
         render = np.concatenate([m[0] for m in meshes]); extent = render.max(axis=0) - render.min(axis=0)
@@ -434,7 +519,7 @@ def convert(archive, objects, materials, textures, template):
         meshes = [(p + shift, n, uv, faces, name) for p, n, uv, faces, name in meshes]
         tris = np.array([[t.a, t.b, t.c] for m in collision for t in m.triangles], np.float64) @ C.T @ turn.T + shift
         material = MATERIAL.get(recipe, category(group)[1])
-        model = model_name(recipe)
+        model = model_name(recipe) + (f'_{tint_hex(tint)}' if tint else '')
         root = ET.Element('Drawable'); node(root, 'Name', model)
         render = np.concatenate([m[0] for m in meshes])
         lo, hi = render.min(axis=0), render.max(axis=0); centre = (lo + hi) / 2
@@ -442,7 +527,8 @@ def convert(archive, objects, materials, textures, template):
         node(root, 'BoundingSphereRadius', value=f(np.linalg.norm(render - centre, axis=1).max()))
         vec(root, 'BoundingBoxMin', lo); vec(root, 'BoundingBoxMax', hi)
         cutouts = [materials[int(m[4].rsplit('_0x', 1)[1], 16)][0].endswith('AlphaTest') for m in meshes]
-        buckets = (8 if any(cutouts) else 0) | (1 if not all(cutouts) else 0)  # bit per bucket: 0 opaque, 3 cutout
+        # bit per bucket: 0 opaque, 2 decal, 3 cutout
+        buckets = (8 if any(cutouts) else 0) | (1 if not all(cutouts) else 0) | (4 if decals else 0)
         for level in ['High', 'Med', 'Low', 'Vlow']:
             node(root, 'LodDist' + level, value=9998)
         for level in ['High', 'Med', 'Low', 'Vlow']:
@@ -454,7 +540,7 @@ def convert(archive, objects, materials, textures, template):
             mat_id = int(name.rsplit('_0x', 1)[1], 16)
             kind, channels = materials[mat_id]
             cutout = kind.endswith('AlphaTest')
-            names = {'DiffuseSampler': textures.name(channels, 'd', cutout),
+            names = {'DiffuseSampler': textures.name(channels, 'd', cutout, tint),
                      'BumpSampler': textures.name(channels, 'nm', cutout),
                      'SpecSampler': textures.name(channels, 's', cutout)}
             for texture in names.values():
@@ -470,6 +556,20 @@ def convert(archive, objects, materials, textures, template):
                 if key == 'specularIntensityMult': param.set('x', '0.3')
                 if key == 'specularFalloffMult': param.set('x', '40')
             shaders.append(shader)
+        # The decal layer: its mesh again, a few millimetres out, with the decal texture on its second UVs.
+        overlays = []
+        for index, second, channels in decals:
+            p, n, _, faces, name = meshes[index]
+            overlays.append((p + n * DECAL_LIFT, n, second, faces, name))
+            names = {'DiffuseSampler': textures.name(channels, 'dc', False),
+                     'BumpSampler': textures.name({}, 'nm', False), 'SpecSampler': textures.name({}, 's', False)}
+            for texture in names.values():
+                if texture not in used:
+                    used.append(texture)
+            shader = copy.deepcopy(decal_template)
+            for param in shader.findall('./Parameters/Item'):
+                if param.get('name') in names: param.find('Name').text = names[param.get('name')]
+            shaders.append(shader)
         for texture in used:
             t = node(dictionary, 'Item'); node(t, 'Name', texture); node(t, 'Unk32', value=128)
             node(t, 'Usage', 'NORMAL' if texture.endswith('_nm') else 'DIFFUSE')
@@ -478,7 +578,7 @@ def convert(archive, objects, materials, textures, template):
         for key, value in [('RenderMask', 255), ('Flags', 0), ('HasSkin', 0), ('BoneIndex', 0), ('Unknown1', 0)]:
             node(model_node, key, value=value)
         geometries = node(model_node, 'Geometries')
-        for i, (p, n, uv, faces, _) in enumerate(meshes):
+        for i, (p, n, uv, faces, _) in enumerate(meshes + overlays):
             if len(p) > 65535:
                 raise ValueError(f'{recipe}: mesh over 65535 vertices')
             t = tangents(p, n, uv, faces)
@@ -493,8 +593,12 @@ def convert(archive, objects, materials, textures, template):
             node(node(g, 'IndexBuffer'), 'Data', ' '.join(map(str, faces.ravel())))
         vertices, polygons = bounds(root, tris, material)
         node(root, 'Lights')
+        # turn and shift: GTA model space = turn @ C @ Skate model space + shift (a saved park's placements need them)
         results.append(dict(group=group, recipe=recipe, model=model, root=root, tris=tris, material=material,
-                            meshes=len(meshes), triangles=int(sum(len(m[3]) for m in meshes)),
+                            turn=np.round(turn, 6).tolist(), shift=np.round(shift, 6).tolist(),
+                            **({'variant_of': model_name(recipe), 'tint': tint_hex(tint)} if tint else {}),
+                            meshes=len(meshes) + len(overlays), decals=len(overlays),
+                            triangles=int(sum(len(m[3]) for m in meshes)),
                             bound_vertices=vertices, bound_polygons=polygons,
                             size=[round(float(x), 3) for x in hi - lo], arena=f'{arena:016x}'))
     return results
@@ -532,24 +636,44 @@ def update_index(world, hashes):
     index.write_text('\n'.join(kept + sorted(ours)) + '\n', encoding='utf-8')
 
 
-def export(park, reference, rage, out, world, workers):
+def shader_template(rage, reference, work, kind, need):
+    """The first shader of `kind` (file name) in an owned .ydr that has the `need` samplers."""
+    dumped = work / f'{Path(reference).stem}.ydr.xml'
+    run_rage(rage, 'resource', 'dump', reference, '-o', dumped)
+    found = next((s for s in ET.parse(dumped).findall('./ShaderGroup/Shaders/Item')
+                  if s.findtext('FileName') in (kind, f'hash_{joaat(kind):08X}')
+                  and need <= {p.get('name') for p in s.findall('./Parameters/Item')}), None)
+    if found is None:
+        raise ValueError(f'{reference} has no {kind} shader with {sorted(need)}')
+    return found
+
+
+def export(park, reference, rage, out, world, workers, decal_reference=None, layouts=None):
     archive = BigArchive(park)
     objects, materials, recipe_paths = recipes(archive)
     work = out.parent / (out.name + '.work')
     shutil.rmtree(work, ignore_errors=True); shutil.rmtree(out, ignore_errors=True)
     work.mkdir(parents=True); out.mkdir(parents=True)
-    reference_xml = work / 'shader-reference.ydr.xml'
-    run_rage(rage, 'resource', 'dump', reference, '-o', reference_xml)
-    template = next(s for s in ET.parse(reference_xml).findall('./ShaderGroup/Shaders/Item')
-                    if {'DiffuseSampler', 'BumpSampler', 'SpecSampler'} <= {p.get('name') for p in s.findall('./Parameters/Item')})
-    if template.findtext('FileName') not in ('normal_spec.sps', f'hash_{joaat("normal_spec.sps"):08X}'):
-        raise ValueError(f'shader reference is {template.findtext("FileName")}, expected normal_spec.sps')
+    samplers = {'DiffuseSampler', 'BumpSampler', 'SpecSampler'}
+    template = shader_template(rage, reference, work, 'normal_spec.sps', samplers)
+    decal_template = shader_template(rage, decal_reference, work, 'normal_spec_decal.sps', samplers) if decal_reference else None
+    if decal_template is None:
+        print('no --decal-reference: Create-a-Park pieces without their decal layer', flush=True)
     textures = Textures(archive, work)
-    items = convert(archive, objects, materials, textures, template)
+    tints = park_tints(layouts, archive) if layouts else []
+    by_name = {o[1]: o for o in objects}
+    variants = [(*by_name[name], tint) for name, tint in tints if name in by_name]
+    items = convert(archive, objects + variants, materials, textures, template, decal_template)
+    if variants:
+        print(f'{len(variants)} tinted copies for the skate.Park lots', flush=True)
     # Normal maps stay full RGB (bc1): rage's default for them is two-channel BC5.
     # Globs, not paths: hundreds of textures would pass Windows' command line limit.
     run_rage(rage, 'textures', 'encode', work / '*_nm.png', '-o', work, '-f', 'bc1')
     run_rage(rage, 'textures', 'encode', work / '*_d.png', work / '*_c.png', work / '*_s.png', '-o', work)
+    if any(work.glob('*_[dc]_*.png')):  # tinted copies' base textures (<key>_<rrggbb>)
+        run_rage(rage, 'textures', 'encode', work / '*_d_*.png', work / '*_c_*.png', '-o', work)
+    if any(work.glob('*_dc.png')):
+        run_rage(rage, 'textures', 'encode', work / '*_dc.png', '-o', work, '-f', 'bc3')
     missing = [p.name for p in work.glob('*.png') if not p.with_suffix('.dds').is_file()]
     if missing:
         raise ValueError(f'textures not encoded: {missing[:5]}')
@@ -566,17 +690,20 @@ def export(park, reference, rage, out, world, workers):
             raise ValueError(f'{item["model"]}: archetype missing, wrong flags or without its embedded bound')
     templates = world.with_suffix('.prop-models')
     templates.mkdir(parents=True, exist_ok=True)
-    for item in items:
-        write_svwc(templates / f'{joaat(item["model"]):08x}.svwc', item['tris'], item['material'])
-    update_index(world, [joaat(i['model']) for i in items])
+    for item in items:  # tinted copies collide as their piece, inside the lots' own templates
+        if 'variant_of' not in item:
+            write_svwc(templates / f'{joaat(item["model"]):08x}.svwc', item['tris'], item['material'])
+    update_index(world, [joaat(i['model']) for i in items if 'variant_of' not in i])
+    ids = recipe_ids(archive)
     if len(archetypes) != len(items):
         raise ValueError(f'{YTYP}.ytyp has {len(archetypes)} archetypes for {len(items)} objects')
     receipt = {'source': {'parkassets_sha256': sha256_file(park), 'recipes': recipe_paths},
                'shader_reference_sha256': sha256_file(reference), 'rage_binary_sha256': sha256_file(rage),
+               'decal_reference_sha256': sha256_file(decal_reference) if decal_reference else None,
                'ytyp': ytyp.name, 'ytyp_sha256': sha256_file(ytyp), 'archetype_flags': ARCHETYPE_FLAGS,
-               'space': 'GTA = C*skate, C=(x,-z,y); quarter turn: ramps face -Y, long objects along Y; centred on X/Y',
+               'space': 'GTA = turn*C*skate + shift, C=(x,-z,y); quarter turn: ramps face -Y, long objects along Y; centred on X/Y',
                'objects': [{k: v for k, v in i.items() if k not in ('root', 'tris')} |
-                           {'tab': 'Park' if i['group'] in PARK_CATEGORIES else 'Props',
+                           {'ids': [] if 'variant_of' in i else ids[i['recipe']], 'tab': 'Park' if i['group'] in PARK_CATEGORIES else 'Props',
                             'category': category(i['group'])[0], 'name': item_name(i['group'], i['recipe']),
                             'hash': f'{joaat(i["model"]):08x}', 'ydr_sha256': h} for i, h in zip(items, hashes)]}
     (out / 'receipt.json').write_text(json.dumps(receipt, indent=2), encoding='utf-8')
@@ -594,17 +721,20 @@ def cpp_items(park):
         return (0, props.index(o[0])) if o[0] in CATEGORIES else (1, park.index(o[0]))
     for group, name, _ in sorted(objects, key=lambda o: (*key(o), o[1].lower())):
         tag = f'kSkate{props.index(group)}' if group in CATEGORIES else f'kPark{park.index(group)}'
-        print(f'    {{"{model_name(name)}", "{item_name(group, name)}", 0.0f, false, {tag}}},')
+        floor = 'false' if group in CATEGORIES else f'{PARK_SINK}f'  # park pieces: sunk (host/src/object_dropper.cpp)
+        print(f'    {{"{model_name(name)}", "{item_name(group, name)}", 0.0f, {floor}, {tag}}},')
 
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--park', type=Path, required=True, help='data/content/parkassets.big from the Skate 3 disc')
     p.add_argument('--shader-reference', type=Path, help='owned GTA .ydr with a normal_spec shader')
+    p.add_argument('--decal-reference', type=Path, help="owned GTA .ydr with a normal_spec_decal shader (Create-a-Park's decal layer)")
     p.add_argument('--rage', type=Path, default=REPO / 'build/tools/rage.exe')
     p.add_argument('--out', type=Path)
     p.add_argument('--world', type=Path, help='the world cache (sk8v.svwc); templates go beside it')
     p.add_argument('--workers', type=int, default=6)
+    p.add_argument('--layouts', type=Path, help="data/big/miscload.big: tinted copies of Skate 3's own parks' pieces")
     p.add_argument('--print-cpp', action='store_true', help='print the host item rows and stop')
     a = p.parse_args()
     if a.print_cpp:
@@ -612,4 +742,4 @@ if __name__ == '__main__':
     else:
         if not (a.shader_reference and a.out and a.world):
             p.error('--shader-reference, --out and --world are required')
-        verify_pins(); export(a.park, a.shader_reference, a.rage, a.out, a.world, a.workers)
+        verify_pins(); export(a.park, a.shader_reference, a.rage, a.out, a.world, a.workers, a.decal_reference, a.layouts)

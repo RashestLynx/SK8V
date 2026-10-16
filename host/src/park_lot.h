@@ -9,6 +9,12 @@
 // LSIA's big hangar door (a map blip finds them) warp in, an exit marker in
 // each lot warps back out by the door; E / d-pad right in a marker. The SK8V
 // menu's skate.Park page does the same and saves / loads the park.
+// Each lot also holds Skate 3's own park for it (setup writes <key>.layout
+// beside parks.txt: the Mega Park in Hartley Stadium, the full Team HQ): its
+// pieces are the Object Dropper's Create-a-Park models, spawned frozen with
+// the lot for GTA (drawn, peds stand on them). Skate's collision for them is
+// already in the lot's own templates (setup bakes it in), so they stay out of
+// Skate's moving-object list (Layout()): hundreds of pieces would not fit.
 // The lots are loaded the Object Dropper's way, not as a GTA map (a map in
 // SK8V's startup pack crashed Story Mode or never streamed, 2026-10-15): the
 // pieces' .ydr (embedded collision for GTA) and the .ytyp are registered
@@ -40,14 +46,24 @@ struct Placed {
 std::string Serialize(const std::vector<Placed>& objects);
 bool Parse(const std::string& text, std::vector<Placed>& out);
 
-// One lot as setup wrote it (parks.txt).
+// One piece of a lot's Skate 3 park: model hash, GTA position, rotation (quaternion x y z w).
+struct LayoutPiece {
+    std::uint32_t model = 0;
+    float pos[3]{};
+    float quat[4]{0.0f, 0.0f, 0.0f, 1.0f};
+};
+// One lot as setup wrote it (parks.txt, and <key>.layout for its Skate 3 park).
 struct Lot {
     std::string key, name;
     float spawn[3]{}, heading = 0.0f, exit[3]{}, origin[3]{}, reach = 0.0f;
     std::vector<std::string> pieces;  // model names, spawned at `origin`
+    std::vector<LayoutPiece> layout;  // Skate 3's park in the lot (none: an empty lot)
 };
 // parks.txt's text -> lots (rows that do not read are skipped). Pure, no GTA.
 std::vector<Lot> ParseLots(const std::string& text);
+// A <key>.layout's text ("SK8VLAYOUT 1", then `HASH x y z qx qy qz qw` a line) -> pieces
+// (false: not a layout). Pure, no GTA.
+bool ParseLayout(const std::string& text, std::vector<LayoutPiece>& out);
 
 using LogFn = void (*)(const char*);
 // Once: the log, on-screen notices, the folder park saves go in, and
@@ -71,6 +87,8 @@ bool Inside();
 bool Busy();
 // The current lot's spawned pieces (Skate builds them in like dropped objects).
 const std::vector<int>& Objects();
+// The current lot's spawned Skate 3 park pieces, sorted (Skate has them in the lot's templates).
+const std::vector<int>& Layout();
 // Script thread, once a frame. `skating`: Skate holds the player (its
 // teleport path re-enters at the new place; otherwise the ped is frozen
 // until the floor's collision is in). `menus`: an SK8V menu or the dropper

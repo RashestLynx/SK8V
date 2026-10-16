@@ -210,6 +210,7 @@ void DynamicWorld::Gather(int self, SvVec3 center, float radius, int presentatio
             const int e = scratch_[i];
             if (e == self || e == presentationEntity || (ignored_ && e == ignored_)) continue;
             if (kind == EntityKind::Object && std::find(placed_.begin(), placed_.end(), e) != placed_.end()) continue;
+            if (kind == EntityKind::Object && excluded_ && std::binary_search(excluded_->begin(), excluded_->end(), e)) continue;
             const Vector3 p = Position(e, positionCheck_, positionLog_);
             const float d2 = Dist2(p, center);
             if (d2 <= kindRadius2) nearby.push_back({d2, e, kind});

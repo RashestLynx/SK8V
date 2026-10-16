@@ -44,9 +44,12 @@ PACKAGE = REPO / 'build/package'
 # Dev-baked material and ground-joint sidecars shipped with the release (DECISIONS 2026-10-06).
 SHIPPED_WORLD = REPO / 'world'
 SHADER_REFERENCE = ('x64w.rpf', 'dlcpacks/mppilot/dlc.rpf/x64/levels/gta5/props/mppilot_props.rpf/pil_p_para_bag_pilot_s.ydr')
+# An owned map decal with GTA's normal_spec_decal shader: Create-a-Park's decal layer (prepare-dropper.py).
+DECAL_REFERENCE = ('x64i.rpf', 'levels/gta5/_citye/downtown_01/dt1_02.rpf/dt1_02_decal.ydr')
 PED_COLLIDER_SOURCE = '88b90e3104464c947439c70764df617f9356ef4f048a3501368c4ab8a494f1b6'  # x64a.rpf z_z_fred.yft
 PACK = r'update\x64\dlcpacks\skatev'
 PARK = 'data/content/parkassets.big'  # Skate 3's Object Dropper objects (prepare-dropper.py)
+LAYOUTS = 'data/big/miscload.big'  # Skate 3's own parks (data/skatepark/*.park): the pieces' colours
 
 
 def binary(name):
@@ -136,18 +139,23 @@ class Prepare:
            '--out', self.assets / 'private/board-native')
 
     def stage_dropper(self):
-        park = self.disc / PARK
-        if not park.is_file():  # read on its own: in xiso.NEEDED it would redo every stage of existing setups
+        park, layouts = self.disc / PARK, self.disc / LAYOUTS
+        for name, path in ((PARK, park), (LAYOUTS, layouts)):
+            if path.is_file():  # read on its own: in xiso.NEEDED it would redo every stage of existing setups
+                continue
             if self.a.skate.is_dir():
-                raise SystemExit(f'{self.disc} is not an extracted Skate 3 disc: missing {PARK}')
+                raise SystemExit(f'{self.disc} is not an extracted Skate 3 disc: missing {name}')
             disc = xiso.Disc(self.a.skate)
             try:
-                disc.extract(PARK, park)
+                disc.extract(name, path)
             finally:
                 disc.close()
         archive, path = SHADER_REFERENCE
         gta_extract.extract(binary(RPF), self.keys, self.gta / archive, [path], self.work / 'shader-reference')
+        decal_archive, decal_path = DECAL_REFERENCE
+        gta_extract.extract(binary(RPF), self.keys, self.gta / decal_archive, [decal_path], self.work / 'decal-reference')
         py('prepare-dropper.py', '--park', park, '--shader-reference', self.work / 'shader-reference' / path,
+           '--decal-reference', self.work / 'decal-reference' / decal_path, '--layouts', layouts,
            '--rage', RAGE, '--out', self.assets / 'private/dropper', '--world', self.world)
 
     def stage_parks(self):

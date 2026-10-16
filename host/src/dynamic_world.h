@@ -62,6 +62,9 @@ public:
     // Object Dropper props and a skate.Park lot's pieces: always gathered, sent with
     // flag 2 so the runtime builds them into the static area (grind rails).
     void SetPlaced(const std::vector<int>& placed) { placed_ = placed; }
+    // Objects Skate already has in its static area some other way (a skate.Park lot's Skate 3
+    // park: in the lot's templates), never gathered. Sorted handles.
+    void SetExcluded(const std::vector<int>* sorted) { excluded_ = sorted; }
     // An entity Skate must not collide with (the dropper's placement ghost).
     void SetIgnored(int entity) { ignored_ = entity; }
     void SetVehicleDamage(bool on, float scale, float min, float radius) {
@@ -101,6 +104,7 @@ private:
     std::vector<int> scratch_;
     std::unordered_map<std::uint32_t, unsigned long> cooldown_;
     std::vector<int> placed_;
+    const std::vector<int>* excluded_ = nullptr;
     int ignored_ = 0;
     bool exchange_ = false;
     bool pedParts_ = false;

@@ -23,10 +23,17 @@ pack: a GTA map in SK8V's dlc.rpf crashed Story Mode, 2026-10-15):
   which the runtime builds into the static area (Skate collision, rails).
 - <data>/parks.txt (the host's park_lot reads it) and parks.json: per lot its
   name, origin, spawn, exit and pieces; receipt.json.
+- <data>/<lot>.layout: Skate 3's own park in the lot (data/big/miscload.big's
+  data/skatepark/<name>.park: the Mega Park in Hartley Stadium, the full Team
+  HQ), each piece as the Object Dropper's model (needs prepare-dropper.py's
+  receipt and templates) with its GTA position and rotation; the host spawns
+  them with the lot for GTA. Their Skate collision goes into the lot's own
+  templates (hundreds of pieces would not fit Skate's list of moving objects).
 Space: Skate's Y-up metres -> GTA C=(x,-z,y) (as prepare-dropper.py), centred
 on X/Y, the floor at the lot's origin height.
 """
 import argparse
+import collections
 import copy
 import importlib.util
 import json
@@ -72,6 +79,9 @@ LOTS = [
     ('teamhq', 'Team HQ', 'DIST_IndustrialSkatePark', (-4600.0, -3400.0, 60.0), 'skate'),
     ('stadium', 'Hartley Stadium', 'DIST_MegaPark', (-4600.0, -2600.0, 60.0), 'render'),
 ]
+# Skate 3's own park per lot (data/skatepark/<name>.park in miscload.big).
+LAYOUTS = {'teamhq': 'Industrial_Fullpark', 'stadium': 'MegaPark_Fullpark'}
+PARKS_BIG = 'data/big/miscload.big'
 # GTA materials.dat indices by the Skate 3 material name's surface word (rust/skatev-runtime/src/materials.rs).
 SURFACE = [('wood', 70), ('metal', 58), ('rail', 59), ('plastic', 84), ('glass', 4), ('grass', 49),
            ('dirt', 32), ('sand', 31), ('brick', 1), ('concrete', 1), ('asphalt', 6), ('tile', 1)]
@@ -85,7 +95,11 @@ def surface(material_name):
 
 def disc_lot(skate, district, work):
     """The lot's .big from the disc image (or an extracted folder)."""
-    name = f'data/content/world{district}.big'
+    return disc_file(skate, f'data/content/world{district}.big', work)
+
+
+def disc_file(skate, name, work):
+    """A file of the disc image (or an extracted folder)."""
     if Path(skate).is_dir():
         return Path(skate) / name
     target = work / name
@@ -96,6 +110,81 @@ def disc_lot(skate, district, work):
         finally:
             disc.close()
     return target
+
+
+def park_records(data):
+    """A Skate 3 .park: (piece id, position, quaternion x y z w, tint r g b 0-255) per placed piece, in Skate's
+    district space. Big endian: a 0x40 byte header (piece count at 0x20), then 48 byte records:
+    id (u64), colour (3 floats, the editor's tint), position (3 floats), rotation (4 floats)."""
+    count = struct.unpack_from('>I', data, 0x20)[0]
+    out = []
+    for at in range(0x40, 0x40 + 48 * count, 48):
+        if at + 48 > len(data):
+            break
+        piece = struct.unpack_from('>Q', data, at)[0]
+        q = np.array(struct.unpack_from('>4f', data, at + 32), np.float64)
+        if np.linalg.norm(q) < .5:  # an empty slot
+            continue
+        tint = tuple(int(round(c * 255)) for c in struct.unpack_from('>3f', data, at + 8))
+        out.append((piece, np.array(struct.unpack_from('>3f', data, at + 20), np.float64), q / np.linalg.norm(q), tint))
+    return out
+
+
+def quat_matrix(q):
+    x, y, z, w = q
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def matrix_quat(m):
+    """Rotation matrix -> quaternion x y z w (Shepperd: from the largest component, safe at 180 degrees)."""
+    trace = m[0, 0] + m[1, 1] + m[2, 2]
+    if trace > 0:
+        s = 2 * np.sqrt(1 + trace)
+        q = [(m[2, 1] - m[1, 2]) / s, (m[0, 2] - m[2, 0]) / s, (m[1, 0] - m[0, 1]) / s, s / 4]
+    elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+        s = 2 * np.sqrt(1 + m[0, 0] - m[1, 1] - m[2, 2])
+        q = [s / 4, (m[0, 1] + m[1, 0]) / s, (m[0, 2] + m[2, 0]) / s, (m[2, 1] - m[1, 2]) / s]
+    elif m[1, 1] > m[2, 2]:
+        s = 2 * np.sqrt(1 + m[1, 1] - m[0, 0] - m[2, 2])
+        q = [(m[0, 1] + m[1, 0]) / s, s / 4, (m[1, 2] + m[2, 1]) / s, (m[0, 2] - m[2, 0]) / s]
+    else:
+        s = 2 * np.sqrt(1 + m[2, 2] - m[0, 0] - m[1, 1])
+        q = [(m[0, 2] + m[2, 0]) / s, (m[1, 2] + m[2, 1]) / s, s / 4, (m[1, 0] - m[0, 1]) / s]
+    q = np.array(q)
+    return q / np.linalg.norm(q)
+
+
+def layout(item, records, pieces, tinted=None):
+    """The lot's park as Object Dropper models (a piece's tinted copy when it has one, `tinted`:
+    (model, rrggbb) -> copy): [(model, GTA position, quaternion x y z w)].
+    A piece's model space is turn @ C @ Skate's + shift (prepare-dropper.py); the lot's GTA
+    space is origin + C @ Skate's district space + the lot's shift."""
+    out, missing = [], collections.Counter()
+    base = np.array(item['origin']) + np.array(item['shift'])
+    for piece, pos, q, *tint in records:
+        o = pieces.get(f'0x{piece:016x}')
+        if o is None:
+            missing[f'0x{piece:016x}'] += 1
+            continue
+        turn, shift = np.array(o['turn']), np.array(o['shift'])
+        m = C @ quat_matrix(q) @ C.T @ turn.T
+        model = (tinted or {}).get((o['model'], ''.join(f'{c:02x}' for c in tint[0])) if tint else None, o['model'])
+        out.append((model, base + C @ pos - m @ shift, matrix_quat(m)))
+    if missing:
+        print(f'{item["name"]}: {sum(missing.values())} pieces of its park are not dropper objects: {dict(missing)}', flush=True)
+    return out
+
+
+def read_svwc(path):
+    """An SVWC 3 template's triangles and GTA material per triangle (each once; tiles repeat them)."""
+    b = path.read_bytes()
+    tiles, records = struct.unpack_from('<II', b, 12)
+    at = 20 + tiles * 16 + tiles * 12
+    rows = np.frombuffer(b, np.uint8, records * 40, at).reshape(records, 40)
+    rows = np.unique(rows, axis=0)
+    return rows[:, :36].copy().view('<f4').reshape(-1, 3, 3).astype(np.float64), rows[:, 36].astype(int).tolist()
 
 
 def stream(big, district, work):
@@ -581,12 +670,12 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
     size = hi - lo
     # The exit stands 3 m from the spawn, towards the lot's longer axis.
     exit_point = spawn + ([3, 0, 0] if size[0] >= size[1] else [0, 3, 0])
-    return dict(key=key, name=label, district=district, origin=origin.round(3).tolist(),
+    return dict(key=key, name=label, district=district, origin=origin.round(3).tolist(), shift=shift.round(6).tolist(),
                 spawn=spawn.round(3).tolist(), heading=0.0, exit=exit_point.round(3).tolist(),
                 size=size.round(2).tolist(), floor=round(float(floor), 3), collision=source, drawables=drawables)
 
 
-def export(skate, reference, rage, data, world):
+def export(skate, reference, rage, data, world, dropper_receipt=None):
     data.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix='sk8v-parks-', dir=data.parent))
     try:
@@ -600,6 +689,33 @@ def export(skate, reference, rage, data, world):
             raise ValueError(f'shader reference is {template.findtext("FileName")}, expected normal_spec.sps')
         textures = work / 'textures'; textures.mkdir()
         lots = [lot(*spec, skate, work, template, textures) for spec in LOTS]
+        # Skate 3's own parks in the lots, as the Object Dropper's models.
+        for old in data.glob('*.layout'):
+            old.unlink()
+        if dropper_receipt and dropper_receipt.is_file():
+            objects = json.loads(dropper_receipt.read_text(encoding='utf-8'))['objects']
+            pieces = {i: o for o in objects if 'turn' in o for i in o.get('ids', [])}
+            tinted = {(o['variant_of'], o['tint']): o['model'] for o in objects if 'variant_of' in o}
+            parks = BigArchive(disc_file(skate, PARKS_BIG, work))
+            for item in lots:
+                entry = next(e for e in parks.entries if e.path.lower() == f'data/skatepark/{LAYOUTS[item["key"]].lower()}.park')
+                placed = layout(item, park_records(parks.read(entry)), pieces, tinted)
+                # Their Skate collision, in the lot's space (its pieces stand at the origin, unturned).
+                templates_dir, cache, tris, mats = world.with_suffix('.prop-models'), {}, [], []
+                base_model = {o['model']: o.get('variant_of', o['model']) for o in objects}
+                for model, pos, q in placed:
+                    if model not in cache:  # a tinted copy collides as its piece
+                        cache[model] = read_svwc(templates_dir / f'{joaat(base_model.get(model, model)):08x}.svwc')
+                    t3, m3 = cache[model]
+                    tris.append(t3 @ quat_matrix(q).T + (pos - np.array(item['origin']))); mats += m3
+                item['layout_tris'] = (np.concatenate(tris), mats) if tris else (np.zeros((0, 3, 3)), [])
+                rows = ['SK8VLAYOUT 1'] + [f'{joaat(m):08X} {p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {q[0]:.6f} {q[1]:.6f} {q[2]:.6f} {q[3]:.6f}'
+                                           for m, p, q in placed]
+                (data / f'{item["key"]}.layout').write_text('\n'.join(rows) + '\n', encoding='utf-8')
+                item['layout'] = {'park': entry.path, 'pieces': len(placed), 'models': len({m for m, _, _ in placed})}
+                print(f'{item["name"]}: {len(placed)} pieces of {entry.path}', flush=True)
+        else:
+            print('no Object Dropper receipt: the lots without their Skate 3 parks', flush=True)
         pngs = sorted(textures.glob('*.png'))
         run_rage(rage, 'textures', 'encode', *[p for p in pngs if p.stem.endswith('_nm')], '-o', textures, '-f', 'bc1')
         run_rage(rage, 'textures', 'encode', *[p for p in pngs if not p.stem.endswith('_nm')], '-o', textures)
@@ -636,10 +752,26 @@ def export(skate, reference, rage, data, world):
         templates.mkdir(parents=True, exist_ok=True)
         hashes = []
         for item in lots:
-            for d in item['drawables']:
-                if len(d['tris']):
-                    write_svwc(templates / f'{joaat(d["name"]):08x}.svwc', d['tris'], d['mats'])
+            # The lot's Skate 3 park joins its pieces' templates (Skate only; GTA has the spawned pieces),
+            # each triangle with the piece whose collision box holds its centre, else the nearest.
+            extra = [([], []) for _ in item['drawables']]
+            park_tris, park_mats = item.get('layout_tris', (np.zeros((0, 3, 3)), []))
+            boxes = [(d['tris'].reshape(-1, 3).min(axis=0)[:2], d['tris'].reshape(-1, 3).max(axis=0)[:2]) if len(d['tris'])
+                     else (np.full(2, np.inf), np.full(2, -np.inf)) for d in item['drawables']]
+            for t3, m in zip(park_tris, park_mats):
+                c = t3.mean(axis=0)[:2]
+                inside = [i for i, (a, b) in enumerate(boxes) if (c >= a).all() and (c <= b).all()]
+                i = inside[0] if inside else min(range(len(boxes)), key=lambda i: np.sum(((boxes[i][0] + boxes[i][1]) / 2 - c) ** 2)
+                                                 if np.isfinite(boxes[i][0]).all() else np.inf)
+                extra[i][0].append(t3); extra[i][1].append(m)
+            for d, (et, em) in zip(item['drawables'], extra):
+                tris = np.concatenate([d['tris'].reshape(-1, 3, 3), np.array(et).reshape(-1, 3, 3)]) if et else d['tris']
+                if len(tris):
+                    write_svwc(templates / f'{joaat(d["name"]):08x}.svwc', tris, list(d['mats']) + em)
                     hashes.append(joaat(d['name']))
+            item.pop('layout_tris', None)
+            if park_mats:
+                print(f'{item["name"]}: {len(park_mats)} triangles of its Skate 3 park in its templates', flush=True)
         dropper.update_index(world, hashes)
         public = lambda i: {k: v for k, v in i.items() if k != 'drawables'} | {
             'pieces': [{k: v for k, v in d.items() if k not in ('root', 'used', 'tris', 'mats')} for d in i['drawables']]}
@@ -670,8 +802,10 @@ if __name__ == '__main__':
     p.add_argument('--rage', type=Path, default=REPO / 'build/tools/rage.exe')
     p.add_argument('--data', type=Path, required=True, help='<assets>/private/parks: the lots and parks.txt for the host')
     p.add_argument('--world', type=Path, required=True, help='the world cache (sk8v.svwc); templates go beside it')
+    p.add_argument('--dropper', type=Path, help="prepare-dropper.py's receipt.json (default: <data>/../dropper/receipt.json)")
     p.add_argument('--no-pins', action='store_true', help='skip the donor pin check (development)')
     a = p.parse_args()
     if not a.no_pins:
         verify_pins()
-    export(a.skate, a.shader_reference, a.rage, a.data.resolve(), a.world.resolve())
+    export(a.skate, a.shader_reference, a.rage, a.data.resolve(), a.world.resolve(),
+           (a.dropper or a.data / '../dropper/receipt.json').resolve())

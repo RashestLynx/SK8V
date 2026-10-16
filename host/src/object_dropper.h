@@ -36,6 +36,9 @@ void Draw();
 void SetLog(void (*log)(const char*));
 // Where setup put Skate 3's objects: <DataRoot>/private/dropper.
 void SetDataRoot(const std::wstring& dataRoot);
+// Once a frame, skating or not: registers Skate 3's objects once streaming is up
+// (the skate.Park lots spawn their Skate 3 parks from these models).
+void Prepare();
 // The runtime's Skate 3 screen (sv_set_object_dropper); returns whether it shows.
 void SetPresenter(bool (*present)(const SvObjectDropper&));
 bool IsOpen();

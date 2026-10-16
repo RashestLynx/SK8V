@@ -46,6 +46,8 @@ constexpr const char* kCategoryDescriptions[kCategoryCount] = {
     "Billboards, flags, tents and media towers", "Trees, palms, bushes and hedges",
     "Los Santos skate park props and street furniture"};
 // floor: the model z that sits on the ground (the _cr copies have buried bases); kLowest: its lowest point.
+// Create-a-Park pieces sit 1.5 cm into the ground, as Skate 3 sinks them a little: flush, the
+// board met their front edge as a bump (2026-10-16).
 struct Item { const char* model; const char* name; float yaw; float floor; Category category; };
 constexpr float kLowest = NAN;
 constexpr Item kItems[] = {
@@ -145,11 +147,12 @@ void Register() {
     }
     const auto reg = streaming::Registrar();
     int count = 0;
-    for (const Item& item : kItems) {
-        if (item.category == kGta) continue;
-        const auto ydr = g_dir / (std::string(item.model) + ".ydr");
-        const std::string path = streaming::NarrowAnsi(ydr), name = std::string(item.model) + ".ydr";
-        if (path.empty() || !std::filesystem::is_regular_file(ydr)) continue;
+    // Every model setup built: the catalogue's and the tinted copies the skate.Park lots' parks use.
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(g_dir, ec)) {
+        if (entry.path().extension() != L".ydr") continue;
+        const std::string path = streaming::NarrowAnsi(entry.path()), name = streaming::NarrowAnsi(entry.path().filename());
+        if (path.empty() || name.empty()) continue;
         std::uint32_t id = ~0u;
         reg(&id, path.c_str(), true, name.c_str(), false, false);
         if (id != ~0u) ++count;
@@ -595,6 +598,7 @@ void SetDataRoot(const std::wstring& dataRoot) {
     g_dir = std::filesystem::path(dataRoot) / L"private" / L"dropper";
     g_registerFailed = false;
 }
+void Prepare() { Register(); }
 void SetPresenter(bool (*present)(const SvObjectDropper&)) { g_present = present; }
 bool IsOpen() { return g_stage != Stage::Closed; }
 void Close() { Close("closed"); }

@@ -2,6 +2,7 @@
 #include "park_lot.h"
 #include <windows.h>
 #include <main.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -35,6 +36,26 @@ bool Parse(const std::string& text, std::vector<Placed>& out) {
         std::string model;
         Placed p;
         if (!(f >> model >> p.pos[0] >> p.pos[1] >> p.pos[2] >> p.rot[0] >> p.rot[1] >> p.rot[2])) return false;
+        char* end = nullptr;
+        p.model = static_cast<std::uint32_t>(std::strtoul(model.c_str(), &end, 16));
+        if (!end || *end || !p.model) return false;
+        out.push_back(p);
+    }
+    return true;
+}
+
+bool ParseLayout(const std::string& text, std::vector<LayoutPiece>& out) {
+    out.clear();
+    std::istringstream in(text);
+    std::string line;
+    if (!std::getline(in, line) || line.rfind("SK8VLAYOUT 1", 0) != 0) return false;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        std::istringstream f(line);
+        std::string model;
+        LayoutPiece p;
+        if (!(f >> model >> p.pos[0] >> p.pos[1] >> p.pos[2] >> p.quat[0] >> p.quat[1] >> p.quat[2] >> p.quat[3])) return false;
         char* end = nullptr;
         p.model = static_cast<std::uint32_t>(std::strtoul(model.c_str(), &end, 16));
         if (!end || *end || !p.model) return false;
@@ -111,8 +132,8 @@ int g_falls = 0;
 // The lots' models: <DataRoot>/private/parks, registered once per process.
 std::filesystem::path g_dir;
 bool g_registered = false, g_registerFailed = false;
-// The spawned pieces and their lot (-1: none).
-std::vector<int> g_pieces;
+// The spawned pieces and their lot (-1: none); the lot's Skate 3 park (sorted handles).
+std::vector<int> g_pieces, g_layout;
 int g_piecesLot = -1;
 
 void Log(const std::string& s) {
@@ -177,10 +198,19 @@ void Register() {
     Log(std::to_string(count) + " lot models registered");
 }
 
+// The lot's models and its Skate 3 park's (the Object Dropper's, registered by it), each once.
+std::vector<Hash> LotModels(int lot) {
+    const Lot& l = g_lots[static_cast<std::size_t>(lot)];
+    std::vector<Hash> out;
+    for (const std::string& piece : l.pieces) out.push_back(util::Joaat(piece));
+    for (const LayoutPiece& p : l.layout)
+        if (std::find(out.begin(), out.end(), static_cast<Hash>(p.model)) == out.end()) out.push_back(static_cast<Hash>(p.model));
+    return out;
+}
+
 bool PiecesLoaded(int lot) {
     bool all = true;
-    for (const std::string& piece : g_lots[static_cast<std::size_t>(lot)].pieces) {
-        const Hash h = util::Joaat(piece);
+    for (const Hash h : LotModels(lot)) {
         if (!Call<BOOL>(gta::HAS_MODEL_LOADED, h)) {
             Call<void>(gta::REQUEST_MODEL, h);
             all = false;
@@ -190,14 +220,15 @@ bool PiecesLoaded(int lot) {
 }
 
 void DeletePieces() {
+    g_pieces.insert(g_pieces.end(), g_layout.begin(), g_layout.end());
+    g_layout.clear();
     for (int object : g_pieces) {
         if (!Call<BOOL>(gta::DOES_ENTITY_EXIST, object)) continue;
         Call<void>(gta::SET_ENTITY_AS_MISSION_ENTITY, object, 1, 1);
         Call<void>(gta::DELETE_OBJECT, &object);
     }
     if (g_piecesLot >= 0)
-        for (const std::string& piece : g_lots[static_cast<std::size_t>(g_piecesLot)].pieces)
-            Call<void>(gta::SET_MODEL_AS_NO_LONGER_NEEDED, util::Joaat(piece));
+        for (const Hash h : LotModels(g_piecesLot)) Call<void>(gta::SET_MODEL_AS_NO_LONGER_NEEDED, h);
     g_pieces.clear();
     g_piecesLot = -1;
 }
@@ -217,8 +248,20 @@ void SpawnPieces(int lot) {
         Call<void>(gta::FREEZE_ENTITY_POSITION, object, 1);
         g_pieces.push_back(object);
     }
+    // Skate 3's park in the lot: the Object Dropper's models where Skate 3 put them.
+    for (const LayoutPiece& p : l.layout) {
+        const int object = Call<int>(gta::CREATE_OBJECT_NO_OFFSET, static_cast<Hash>(p.model), p.pos[0], p.pos[1], p.pos[2],
+                                     false, false, false, 0);
+        if (!object) continue;
+        Call<void>(gta::SET_ENTITY_QUATERNION, object, p.quat[0], p.quat[1], p.quat[2], p.quat[3]);
+        Call<void>(gta::SET_ENTITY_AS_MISSION_ENTITY, object, 1, 1);
+        Call<void>(gta::FREEZE_ENTITY_POSITION, object, 1);
+        g_layout.push_back(object);
+    }
+    std::sort(g_layout.begin(), g_layout.end());
     g_piecesLot = lot;
-    Log(l.name + ": " + std::to_string(g_pieces.size()) + " of " + std::to_string(l.pieces.size()) + " pieces spawned");
+    Log(l.name + ": " + std::to_string(g_pieces.size()) + " of " + std::to_string(l.pieces.size()) + " pieces spawned, " +
+        std::to_string(g_layout.size()) + " of " + std::to_string(l.layout.size()) + " of its Skate 3 park");
 }
 
 bool CanWarp(int ped) {
@@ -349,8 +392,18 @@ void Start(LogFn log, std::function<void(const std::string&)> notify, const std:
     if (in) text << in.rdbuf();
     g_lots = ParseLots(text.str());
     g_dir = std::filesystem::path(lotsFile).parent_path();
+    for (Lot& l : g_lots) {
+        std::ifstream layout(g_dir / (util::Wide(l.key) + L".layout"), std::ios::binary);
+        if (!layout) continue;
+        std::stringstream lines;
+        lines << layout.rdbuf();
+        if (!ParseLayout(lines.str(), l.layout)) {
+            l.layout.clear();
+            Log(l.name + "'s layout does not read (rerun SK8V setup)");
+        }
+    }
     std::string names;
-    for (const Lot& l : g_lots) names += (names.empty() ? "" : ", ") + l.name;
+    for (const Lot& l : g_lots) names += (names.empty() ? "" : ", ") + l.name + " (" + std::to_string(l.layout.size()) + " park pieces)";
     Log(g_lots.empty() ? "no Skate 3 park lots (rerun SK8V setup)" : std::to_string(g_lots.size()) + " lots: " + names);
 }
 void SetObjects(std::function<std::vector<int>()> objects) { g_objects = std::move(objects); }
@@ -434,6 +487,7 @@ void Load() {
 bool Inside() { return g_lot >= 0; }
 bool Busy() { return g_step != Step::Idle; }
 const std::vector<int>& Objects() { return g_pieces; }
+const std::vector<int>& Layout() { return g_layout; }
 
 void Tick(bool skating, bool menus) {
     if (g_lots.empty()) return;
