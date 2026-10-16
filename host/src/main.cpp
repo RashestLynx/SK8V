@@ -2773,6 +2773,35 @@ void DevCommand(Session& s) {
     } else if (verb == "tp") {
         float x = 0, y = 0, z = 0;
         if (words >> x >> y >> z) Call<void>(gta::SET_ENTITY_COORDS_NO_OFFSET, ped, x, y, z, 0, 0, 0);
+    } else if (verb == "ipl" && (words >> what)) {
+        Call<void>(gta::REQUEST_IPL, what.c_str());
+        Logf("SkateV dev: REQUEST_IPL %s -> active %d", what.c_str(), Call<BOOL>(gta::IS_IPL_ACTIVE, what.c_str()) ? 1 : 0);
+    } else if (verb == "iplq" && (words >> what)) {
+        Logf("SkateV dev: IS_IPL_ACTIVE %s = %d", what.c_str(), Call<BOOL>(gta::IS_IPL_ACTIVE, what.c_str()) ? 1 : 0);
+    } else if (verb == "model" && (words >> what)) {
+        const Hash h = util::Joaat(what);
+        Logf("SkateV dev: model %s %08x in cd image %d, valid %d", what.c_str(), h, Call<BOOL>(gta::IS_MODEL_IN_CDIMAGE, h) ? 1 : 0,
+             Call<BOOL>(gta::IS_MODEL_VALID, h) ? 1 : 0);
+    } else if (verb == "itype" && (words >> what)) {
+        // Loads a registered .ytyp by name, as the dropper loads its own (streaming.h).
+        if (streaming::Ready() && streaming::Guards()) {
+            streaming::TypeLoader()(what.c_str());
+            Logf("SkateV dev: type file %s requested", what.c_str());
+        } else {
+            Logf("SkateV dev: streaming not ready or guards differ");
+        }
+    } else if (verb == "spawn" && (words >> what)) {
+        // Loads a model and puts it 5 m ahead of the ped (frozen): does GTA draw it?
+        const Hash h = util::Joaat(what);
+        Call<void>(gta::REQUEST_MODEL, h);
+        const DWORD until = GetTickCount() + 5000;
+        while (!Call<BOOL>(gta::HAS_MODEL_LOADED, h) && static_cast<int>(GetTickCount() - until) < 0) WAIT(0);
+        const Vector3 p = Call<Vector3>(gta::GET_ENTITY_COORDS, ped, 1);
+        const int o = Call<BOOL>(gta::HAS_MODEL_LOADED, h)
+                          ? Call<int>(gta::CREATE_OBJECT_NO_OFFSET, h, p.x, p.y + 5.0f, p.z - 1.0f, 0, 0, 0)
+                          : 0;
+        if (o) Call<void>(gta::FREEZE_ENTITY_POSITION, o, 1);
+        Logf("SkateV dev: spawn %s loaded %d object %d", what.c_str(), Call<BOOL>(gta::HAS_MODEL_LOADED, h) ? 1 : 0, o);
     }
 }
 
