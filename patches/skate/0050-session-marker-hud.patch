@@ -1,0 +1,48 @@
+diff --git a/crates/skate-host/src/physics/bridge/hud.rs b/crates/skate-host/src/physics/bridge/hud.rs
+index a876b20..1a9a57a 100644
+--- a/crates/skate-host/src/physics/bridge/hud.rs
++++ b/crates/skate-host/src/physics/bridge/hud.rs
+@@ -60,3 +60,25 @@ impl Session {
+         }
+     }
+ }
++
++/// Skate's session marker as its quick menu (hold LB) shows it, after the
++/// last tick (overlay patch 0050).
++#[derive(Clone, Copy, Debug, Default, PartialEq)]
++pub struct MarkerHud {
++    /// LB is held.
++    pub visible: bool,
++    /// LB + d-pad down would place a marker here.
++    pub can_place: bool,
++    /// A marker is set and LB + d-pad up would return to it.
++    pub can_return: bool,
++    /// Return hold progress, 0..1.
++    pub progress: f32,
++}
++
++impl Session {
++    /// SkateV: the session marker's HUD state after the last `advance`.
++    pub fn marker_hud(&self) -> MarkerHud {
++        let (visible, can_place, can_return, progress) = self.markers.hud();
++        MarkerHud { visible, can_place, can_return, progress }
++    }
++}
+diff --git a/crates/skate-host/src/session_marker/mod.rs b/crates/skate-host/src/session_marker/mod.rs
+index 3ab3b98..550458c 100644
+--- a/crates/skate-host/src/session_marker/mod.rs
++++ b/crates/skate-host/src/session_marker/mod.rs
+@@ -35,6 +35,13 @@ impl Runtime {
+     pub fn load(root: &std::path::Path) -> Result<Self,String> { Ok(Self{session:SessionMarker::default(),validation:validation::Validation::load(root)?}) }
+     pub fn suspend(&mut self) { self.session.hold.cancel(); self.session.blocked_until_release=true; self.session.ui_time=0.; }
+     pub fn collect_time(&mut self,dt:f64) { self.session.ui_time+=dt; }
++    /// SkateV: what the quick-menu HUD shows after the last `advance`
++    /// (visible, can place, can return, return progress). A suspend hides
++    /// it until LB is released, as it blocks the marker itself.
++    pub fn hud(&self) -> (bool, bool, bool, f32) {
++        let s = &self.session;
++        (s.visible && !s.blocked_until_release, s.can_place, s.can_return, s.progress)
++    }
+     pub fn advance(&mut self,input:&ControllerInput,physics:&GamePhysics,skater:&mut SkaterRuntime) {
+         update(&mut self.session,input,physics,skater,&self.validation);
+     }
