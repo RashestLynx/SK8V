@@ -320,22 +320,31 @@ def surface_points(t, step):
     return t[0] + np.outer(a[keep] / n, e1) + np.outer(b[keep] / n, e2)
 
 
-def drop_hidden(tris, render, reach=1.0):
-    """Skate 3's Team HQ grows as the player's team does, and its collision holds the
-    walls of every stage: 10-15 m slabs across the hall, one beside the spawn, that
-    the stage we draw does not have (the player's invisible walls, 2026-10-16). A
-    collision face less than a third of which lies within `reach` of any visible
-    face is dropped."""
-    cell = reach / 2
-    seen = set()
+def drop_hidden(tris, render, reach=1.0, rise=.1):
+    """Skate 3's Team HQ grows as the player's team does, and its collision holds every
+    stage: 5-15 m walls across the hall (one beside the spawn), a 20 cm slab under it,
+    and floor and roof outside the building, none of them in the stage we draw (the
+    player's invisible walls, 2026-10-16). A collision face is kept when at least a
+    third of it lies near visible faces of its kind: a wall within `reach` of a visible
+    wall, a floor (or roof, or ramp) within `reach` across and `rise` up or down of a
+    visible one. (A wall near only the floor is not seen.)"""
+    def steep(t):
+        n = np.cross(t[1] - t[0], t[2] - t[0]); length = np.linalg.norm(n)
+        return length < 1e-12 or abs(n[2]) / length < .5
+    cells = {True: np.array([reach / 2] * 3), False: np.array([reach / 2, reach / 2, rise / 2])}
+    seen = {True: set(), False: set()}
     for r in render:
-        for q in np.floor(surface_points(r, cell) / cell).astype(np.int64):
-            seen.add((int(q[0]), int(q[1]), int(q[2])))
+        kind = steep(r)
+        for q in np.floor(surface_points(r, .25) / cells[kind]).astype(np.int64):
+            seen[kind].add((int(q[0]), int(q[1]), int(q[2])))
     span = range(-2, 3)
+    rises = {True: span, False: range(-1, 2)}  # a floor: within 5-10 cm up or down
     out, dropped = [], 0
     for t3 in tris:
-        pts = np.floor(surface_points(t3, reach / 2) / cell).astype(np.int64)
-        near = sum(any((int(x) + dx, int(y) + dy, int(z) + dz) in seen for dx in span for dy in span for dz in span)
+        kind = steep(t3)
+        near_cells = seen[kind]
+        pts = np.floor(surface_points(t3, reach / 2) / cells[kind]).astype(np.int64)
+        near = sum(any((int(x) + dx, int(y) + dy, int(z) + dz) in near_cells for dx in span for dy in span for dz in rises[kind])
                    for x, y, z in pts)
         if near * 3 >= len(pts):
             out.append(t3)

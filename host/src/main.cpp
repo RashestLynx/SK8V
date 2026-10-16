@@ -452,14 +452,16 @@ XInputGetStateFn PadGetState() {
     return fn;
 }
 
-// Dev: a scripted controller (dev command 'pad'), used instead of the real pad until
-// g_padUntil, so an unattended test can ride (no virtual gamepad driver needed).
+// Dev: a scripted controller (dev command 'pad'), used instead of the real pad, so an
+// unattended test can ride (no virtual gamepad driver needed). It holds its state until
+// g_padUntil, then stays connected with nothing pressed ('pad off' hands back the real pad):
+// with no controller plugged in, Skate would otherwise stop between two presses.
 SvPad g_padScript{};
 DWORD g_padUntil = 0;
 
 SvPad ReadPadRaw() {
-    if (g_padUntil && static_cast<int>(GetTickCount() - g_padUntil) < 0) {
-        SvPad pad = g_padScript;
+    if (g_padUntil) {
+        SvPad pad = static_cast<int>(GetTickCount() - g_padUntil) < 0 ? g_padScript : SvPad{};
         pad.connected = 1;
         static std::uint32_t s_packet = 0;
         pad.packet = ++s_packet;
@@ -2800,10 +2802,12 @@ void DevCommand(Session& s) {
         Logf("SkateV dev: model %s %08x in cd image %d, valid %d", what.c_str(), h, Call<BOOL>(gta::IS_MODEL_IN_CDIMAGE, h) ? 1 : 0,
              Call<BOOL>(gta::IS_MODEL_VALID, h) ? 1 : 0);
     } else if (verb == "pad") {
-        // pad <buttons hex> <left x> <left y> <right trigger> <ms>: that pad state for ms.
+        // pad <buttons hex> <left x> <left y> <right trigger> <ms>: that pad state for ms; pad off.
         std::string buttons;
         int lx = 0, ly = 0, rt = 0, ms = 0;
-        if (words >> buttons >> lx >> ly >> rt >> ms) {
+        if (words >> buttons && buttons == "off") {
+            g_padUntil = 0;
+        } else if (words >> lx >> ly >> rt >> ms) {
             g_padScript = SvPad{};
             g_padScript.buttons = static_cast<std::uint16_t>(std::strtoul(buttons.c_str(), nullptr, 16));
             g_padScript.left_x = static_cast<std::int16_t>(std::clamp(lx, -32767, 32767));
