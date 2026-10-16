@@ -16,19 +16,34 @@ using gta::Call;
 
 // Skate 3's own dropper objects first, in its groups and order (setup builds
 // them from the player's disc: tools/prepare-dropper.py, models sk3_*), then
-// GTA's skate-park props and street furniture. Every one has an exact template
+// Create-a-Park's pieces (quarter pipes, mega ramps, funboxes, ledges; each in
+// its Downtown, Industrial and University look), then GTA's skate-park props
+// and street furniture. Every one has an exact template
 // in the world cache. Ramps face local -Y, so a skater rolling along the
 // prop's +Y meets the ramp (yaw 0); setup turns Skate 3's objects that way and
 // lays their long ones along Y. GTA's long spots lie along local X and turn a
 // quarter so their edges run along the skater's line. GTA's skate props are
 // their *_cr copies: only those carry the archetype flag CREATE_OBJECT needs.
-enum Category { kSkate0, kSkate1, kSkate2, kSkate3, kSkate4, kSkate5, kSkate6, kGta, kCategoryCount };
+enum Category {
+    kSkate0, kSkate1, kSkate2, kSkate3, kSkate4, kSkate5, kSkate6,
+    kPark0, kPark1, kPark2, kPark3, kPark4, kPark5, kPark6, kPark7, kPark8, kPark9, kPark10, kPark11,
+    kGta, kCategoryCount
+};
 constexpr const char* kCategoryNames[kCategoryCount] = {
-    "Ramps", "Rails", "Benches & Barriers", "Tables", "Bins", "Boxes", "Misc", "GTA Props"};
+    "Ramps", "Rails", "Benches & Barriers", "Tables", "Bins", "Boxes", "Misc",
+    "Vert", "Street", "Mega", "Pre-made", "Ledges", "Park Rails", "Plaza", "Catwalks & Misc", "Street Furniture",
+    "Landmarks", "Branded", "Foliage",
+    "GTA Props"};
 // The screen's description box, per group.
 constexpr const char* kCategoryDescriptions[kCategoryCount] = {
     "Quarter pipes, kickers, wedges and manual pads", "Flat, kinked and hi-lo rails", "Benches, ledges and barriers to grind",
     "Tables to grind and manual", "Bins and dumpsters", "Crates and boxes", "Everything else",
+    "Vert pads, quarter pipes, corners, hips, roll-ins and extensions", "Street pads, quarter pipes, banks, ramps and stairs",
+    "Mega ramp roll-ins, launches, landings, quarter pipes and full pipes", "Ready-made quarter pipes, funboxes and bowl stairs",
+    "Ledges, down ledges and hubbas", "Round and square rails, down rails, fences and rainbow rails",
+    "Plaza pads, big stairs, planters, grass and water boxes", "Catwalks, fences, jumbotrons and grandstands",
+    "Benches, lamp posts, ad boards and awnings", "Signs, planters, vehicles and pieces of the city",
+    "Billboards, flags, tents and media towers", "Trees, palms, bushes and hedges",
     "Los Santos skate park props and street furniture"};
 // floor: the model z that sits on the ground (the _cr copies have buried bases); kLowest: its lowest point.
 struct Item { const char* model; const char* name; float yaw; float floor; Category category; };
@@ -51,9 +66,9 @@ constexpr Item kItems[] = {
     {"prop_dumpster_01a", "Dumpster", 90.0f, kLowest, kGta},
 };
 constexpr int kItemCount = static_cast<int>(sizeof(kItems) / sizeof(kItems[0]));
-// The screen's tabs (retail: Props, Terrain): Skate 3's groups, then GTA's.
+// The screen's tabs (retail: Props, Terrain): Skate 3's dropper groups, Create-a-Park's, then GTA's.
 struct Tab { const char* name; Category first, last; };
-constexpr Tab kTabs[] = {{"Props", kSkate0, kSkate6}, {"GTA", kGta, kGta}};
+constexpr Tab kTabs[] = {{"Props", kSkate0, kSkate6}, {"Park", kPark0, kPark11}, {"GTA", kGta, kGta}};
 // Gap from the skater to the near edge of a new ghost.
 constexpr float kAhead = 3.0f;
 constexpr DWORD kLoadTimeoutMs = 5000;

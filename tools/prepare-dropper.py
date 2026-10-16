@@ -7,10 +7,13 @@ the player's PC.
         --out <assets>/private/dropper --world <world>/sk8v.svwc
 
 Source (owned disc): the dynamic recipe (recipe/dynamic/dynamic_db_*.xml) lists
-the dropper's objects in its <comp> groups; each <mod> names its model RX2
-(lod arenaid). A model carries its render meshes (mdl_parser) and Skate's own
-collision (RenderWare ClusteredMesh, retail_collision_mesh); a mesh's name ends
-in its recipe <mat> id, whose <sp> channels name the texture RX2s.
+the dropper's objects in its <comp> groups, the static recipe (recipe/static/
+static_db_*.xml) Create-a-Park's pieces (quarter pipes, mega ramps, funboxes,
+ledges, stairs; each in its Downtown, Industrial and University look); each
+<mod> names its model RX2 (lod arenaid). A model carries its render meshes
+(mdl_parser) and Skate's own collision (RenderWare ClusteredMesh,
+retail_collision_mesh); a mesh's name ends in its recipe <mat> id, whose <sp>
+channels name the texture RX2s.
 
 Output, per object (model sk3_<recipe name>):
 - <out>/<model>.ydr: render meshes (owned normal_spec shader schema, embedded
@@ -79,8 +82,31 @@ MATERIAL = {
     'cn_DMO_Glbl_SlideWithPlatformStair': METAL, 'cm_DMO_glbl_LoadingRamp': METAL, 'co_DMO_Glbl_StaircaseMoveable': METAL,
     'ck_dmo_Ind_ramp': METAL, 'cf_DMO_UN_CrackedGroundJump': CONCRETE, 'cr_DMO_DT_TileBroken': CONCRETE,
     'cb_DMO_Glbl_patioTable': METAL, 'ao_dmo_Ind_table': METAL, 'aa_DMO_UN_PicnicTable': METAL}
+# Create-a-Park's groups (static recipe) -> (host category, default material), in
+# the host's order. Its teleports and spawner are markers, not models.
+PARK_CATEGORIES = {
+    'Vert': ('Vert', CONCRETE), 'Street': ('Street', CONCRETE), 'Mega': ('Mega', WOOD), 'PreMade': ('Pre-made', CONCRETE),
+    'Hubbas': ('Ledges', CONCRETE), 'Rails': ('Park Rails', METAL), 'Plaza': ('Plaza', CONCRETE),
+    'Misc': ('Catwalks & Misc', METAL), 'DownTown': ('Street Furniture', METAL), 'OTS': ('Landmarks', CONCRETE),
+    'Branded': ('Branded', METAL), 'Foliage': ('Foliage', WOOD)}
+PARK_MARKERS = {'Teleports', 'Spawner'}
 # Objects whose sloped faces set their facing (a ramp faces local -Y).
 SLOPED = {'an_DMO_UN_PicnicTableRamp'}
+SLOPED_GROUPS = {'DMO_Ramps', 'Vert', 'Street', 'Mega', 'PreMade'}
+# Create-a-Park names run words together: the words they use, longest first.
+PARK_WORDS = sorted('''big stairs round invert bowed in out banked grass corner hip box ledge planter long short curve cap
+    plaza pad water bush fall tree hedge palm shrub yucca down hubba square rail variation fat fence kink bend mega
+    rainbow up branded pole flag media tower tent billboard wide wall mount stand ad board awning lamp post blue floating
+    bench diamond metal shelter gazebo with clean organic waterfront hole reclaimed park filler roll flat lower launch
+    ramp quarter quater pipe landing full straight catwalk support chain link pepper can balloon tri pod camera jumbo
+    tron measuring stick grand the sign logging vehicle tractor yellow trailer brewery cubes mall store island hotel
+    spillway street ledges legdes university shark stadium trans industrial guard propeller stacks skylight electric end
+    mid tanker preset funbox folded steep escalator extension mirror mini kicker wave deck bridge clip ind svm lampost'''.split(),
+                    key=len, reverse=True)
+PARK_SIZES = {'lrg': 'Large', 'lg': 'Large', 'md': 'Medium', 'med': 'Medium', 'sm': 'Small', 'sml': 'Small'}
+PARK_SPELLING = {'Quater': 'Quarter', 'Legdes': 'Ledges', 'Lampost': 'Lamp Post', 'Svm': 'SVM', 'Ind': 'Industrial', 'Dr': 'Dr'}
+PARK_NAMES = {'qd_roundraiHlilokink': 'Round Rail Hi-Lo Kink', 'ja_benchWrainbowRail': 'Bench With Rainbow Rail',
+              'de_TriPodCamera': 'Tripod Camera'}
 NAMES = {  # display names the recipe name does not spell out
     'ao_DMO_UN_CommuntiySkateParkBench': 'Skate Park Bench', 'ad_DMO_UN_ADBench': 'Old Bench',
     'ez_DMO_UN_BasketballStantion': 'Basketball Stand', 'ap_DMO_glbl_WoodenPalette': 'Wooden Pallet',
@@ -107,19 +133,72 @@ def display_name(recipe):
     return ' '.join(w if w.isupper() and len(w) > 1 else w.capitalize() for w in words)
 
 
+def split_words(run):
+    """A lower-case run of PARK_WORDS ('quarterpiperollin') as its words; unknown letters stay one word."""
+    out, at, other = [], 0, ''
+    while at < len(run):
+        word = next((w for w in PARK_WORDS if run.startswith(w, at)), None)
+        if word:
+            if other: out.append(other); other = ''
+            out.append(word); at += len(word)
+        else:
+            other += run[at]; at += 1
+    return out + ([other] if other else [])
+
+
+def park_name(recipe):
+    """'ba_quarterpipe90corner_lrg_Downtown' -> 'Quarter Pipe 90 Corner Large (Downtown)'."""
+    theme = re.search(r'_(downtown|industrial|university)$', recipe, re.I)
+    base = recipe[:theme.start()] if theme else recipe
+    if base in PARK_NAMES:
+        return f'{PARK_NAMES[base]} ({theme.group(1).capitalize()})' if theme else PARK_NAMES[base]
+    body = re.sub(r'^[a-z]{2}_', '', base, flags=re.I).replace('XLrg', '_XL')
+    words = []
+    for part in filter(None, body.split('_')):
+        if part.lower() in PARK_SIZES:
+            words.append(PARK_SIZES[part.lower()]); continue
+        for token in re.findall(r'[A-Z]{2,}(?=[A-Z][a-z]|\d|$)|[A-Z]?[a-z]+|[A-Z]+|\d+', part):
+            words += [token] if token.isdigit() or token.isupper() else split_words(token.lower())
+    name = ' '.join(PARK_SPELLING.get(w.capitalize(), w if w.isupper() else w.capitalize()) for w in words)
+    return f'{name} ({theme.group(1).capitalize()})' if theme else name
+
+
 def catalogue(recipe_xml):
-    """[(group, recipe name, model arena id, [material ids])] in recipe order."""
+    """([(group, recipe name, model arena id)] in recipe order, {material id: (type, channels)})."""
     root = ET.fromstring(recipe_xml)
     materials = {int(m.get('id'), 16): (m.get('type'), {sp.get('chn'): int(sp.get('id'), 16) for sp in m.findall('sp')})
                  for m in root.findall('mat')}
     objects = []
     for comp in root.findall('comp'):
-        if comp.get('n') not in CATEGORIES:
+        if comp.get('n') in PARK_MARKERS:
+            continue
+        if comp.get('n') not in CATEGORIES and comp.get('n') not in PARK_CATEGORIES:
             raise ValueError(f'unknown dropper group {comp.get("n")}')
         for mod in comp.findall('mod'):
             lod = min(mod.findall('lod'), key=lambda l: int(l.get('idx')))
             objects.append((comp.get('n'), mod.get('n'), int(lod.get('arenaid'), 16)))
     return objects, materials
+
+
+def recipes(archive):
+    """The dropper's objects (dynamic recipe) then Create-a-Park's pieces (static recipe), and their materials."""
+    objects, materials, paths = [], {}, []
+    for kind in ('dynamic', 'static'):
+        entry = next(e for e in archive.entries if re.search(rf'recipe/{kind}/{kind}_db_[^/]*\.xml$', e.path))
+        o, m = catalogue(archive.read(entry))
+        objects += o; materials |= m; paths.append(entry.path)
+    models = [model_name(o[1]) for o in objects]
+    if len(set(models)) != len(models):
+        raise ValueError('two recipe objects share a model name')
+    return objects, materials, paths
+
+
+def category(group):
+    return CATEGORIES.get(group) or PARK_CATEGORIES[group]
+
+
+def item_name(group, recipe):
+    return park_name(recipe) if group in PARK_CATEGORIES else display_name(recipe)
 
 
 def face_normals(p, n, faces):
@@ -318,7 +397,7 @@ def write_svwc(path, tris, material, tile=64.0):
 def convert(archive, objects, materials, textures, template):
     """Every object's GTA-space meshes, bound and drawable XML (no rage yet)."""
     models = {int(Path(e.path).stem, 16): e for e in archive.entries
-              if '/dynamic/model/' in e.path and e.path.endswith('.rx2')}
+              if re.search(r'/(dynamic|static)/model/', e.path) and e.path.endswith('.rx2')}
     results = []
     for group, recipe, arena in objects:
         raw = archive.read(models[arena])
@@ -346,7 +425,7 @@ def convert(archive, objects, materials, textures, template):
         render = np.concatenate([m[0] for m in meshes]); extent = render.max(axis=0) - render.min(axis=0)
         laid = group == 'DMO_Rails' and extent[2] > 2.5 * extent[:2].max()
         lay = np.array([[1., 0, 0], [0, 0, 1], [0, -1, 0]]) if laid else np.eye(3)
-        sloped = group == 'DMO_Ramps' or recipe in SLOPED
+        sloped = group in SLOPED_GROUPS or recipe in SLOPED
         turn = quarter(facing([(p @ lay.T, n @ lay.T, uv, faces) for p, n, uv, faces, _ in meshes], sloped)) @ lay
         meshes = [(p @ turn.T, n @ turn.T, uv, faces, name) for p, n, uv, faces, name in meshes]
         render = np.concatenate([m[0] for m in meshes])
@@ -354,7 +433,7 @@ def convert(archive, objects, materials, textures, template):
         shift = np.array([*(-(render.min(axis=0) + render.max(axis=0))[:2] / 2), -render.min(axis=0)[2] if laid else 0])
         meshes = [(p + shift, n, uv, faces, name) for p, n, uv, faces, name in meshes]
         tris = np.array([[t.a, t.b, t.c] for m in collision for t in m.triangles], np.float64) @ C.T @ turn.T + shift
-        material = MATERIAL.get(recipe, CATEGORIES[group][1])
+        material = MATERIAL.get(recipe, category(group)[1])
         model = model_name(recipe)
         root = ET.Element('Drawable'); node(root, 'Name', model)
         render = np.concatenate([m[0] for m in meshes])
@@ -455,8 +534,7 @@ def update_index(world, hashes):
 
 def export(park, reference, rage, out, world, workers):
     archive = BigArchive(park)
-    recipe = next(e for e in archive.entries if re.search(r'recipe/dynamic/dynamic_db_[^/]*\.xml$', e.path))
-    objects, materials = catalogue(archive.read(recipe))
+    objects, materials, recipe_paths = recipes(archive)
     work = out.parent / (out.name + '.work')
     shutil.rmtree(work, ignore_errors=True); shutil.rmtree(out, ignore_errors=True)
     work.mkdir(parents=True); out.mkdir(parents=True)
@@ -469,13 +547,16 @@ def export(park, reference, rage, out, world, workers):
     textures = Textures(archive, work)
     items = convert(archive, objects, materials, textures, template)
     # Normal maps stay full RGB (bc1): rage's default for them is two-channel BC5.
-    pngs = sorted(work.glob('*.png'))
-    run_rage(rage, 'textures', 'encode', *[p for p in pngs if p.stem.endswith('_nm')], '-o', work, '-f', 'bc1')
-    run_rage(rage, 'textures', 'encode', *[p for p in pngs if not p.stem.endswith('_nm')], '-o', work)
+    # Globs, not paths: hundreds of textures would pass Windows' command line limit.
+    run_rage(rage, 'textures', 'encode', work / '*_nm.png', '-o', work, '-f', 'bc1')
+    run_rage(rage, 'textures', 'encode', work / '*_d.png', work / '*_c.png', work / '*_s.png', '-o', work)
+    missing = [p.name for p in work.glob('*.png') if not p.with_suffix('.dds').is_file()]
+    if missing:
+        raise ValueError(f'textures not encoded: {missing[:5]}')
     with ThreadPoolExecutor(workers) as pool:
         hashes = list(pool.map(lambda item: build(rage, work, out, item), items))
     ytyp = out / f'{YTYP}.ytyp'
-    run_rage(rage, 'ytyp', 'from-drawables', *[out / f'{i["model"]}.ydr' for i in items], '-o', ytyp,
+    run_rage(rage, 'ytyp', 'from-drawables', out, '-o', ytyp,
              '--flags', ARCHETYPE_FLAGS, '--lod-dist', LOD_DISTANCE, '--hd-dist', LOD_DISTANCE)
     dumped = work / f'{YTYP}.ytyp.xml'; run_rage(rage, 'resource', 'dump', ytyp, '-o', dumped)
     archetypes = {a.findtext('name'): a for a in ET.parse(dumped).findall('./archetypes/Item')}
@@ -488,12 +569,15 @@ def export(park, reference, rage, out, world, workers):
     for item in items:
         write_svwc(templates / f'{joaat(item["model"]):08x}.svwc', item['tris'], item['material'])
     update_index(world, [joaat(i['model']) for i in items])
-    receipt = {'source': {'parkassets_sha256': sha256_file(park), 'recipe': recipe.path},
+    if len(archetypes) != len(items):
+        raise ValueError(f'{YTYP}.ytyp has {len(archetypes)} archetypes for {len(items)} objects')
+    receipt = {'source': {'parkassets_sha256': sha256_file(park), 'recipes': recipe_paths},
                'shader_reference_sha256': sha256_file(reference), 'rage_binary_sha256': sha256_file(rage),
                'ytyp': ytyp.name, 'ytyp_sha256': sha256_file(ytyp), 'archetype_flags': ARCHETYPE_FLAGS,
                'space': 'GTA = C*skate, C=(x,-z,y); quarter turn: ramps face -Y, long objects along Y; centred on X/Y',
                'objects': [{k: v for k, v in i.items() if k not in ('root', 'tris')} |
-                           {'category': CATEGORIES[i['group']][0], 'name': display_name(i['recipe']),
+                           {'tab': 'Park' if i['group'] in PARK_CATEGORIES else 'Props',
+                            'category': category(i['group'])[0], 'name': item_name(i['group'], i['recipe']),
                             'hash': f'{joaat(i["model"]):08x}', 'ydr_sha256': h} for i, h in zip(items, hashes)]}
     (out / 'receipt.json').write_text(json.dumps(receipt, indent=2), encoding='utf-8')
     shutil.rmtree(work, ignore_errors=True)
@@ -501,13 +585,16 @@ def export(park, reference, rage, out, world, workers):
 
 
 def cpp_items(park):
-    """The host's kItems rows for the disc's catalogue (host/src/object_dropper.cpp)."""
-    archive = BigArchive(park)
-    recipe = next(e for e in archive.entries if re.search(r'recipe/dynamic/dynamic_db_[^/]*\.xml$', e.path))
-    objects, _ = catalogue(archive.read(recipe))
-    order = list(CATEGORIES)
-    for group, name, _ in sorted(objects, key=lambda o: (order.index(o[0]), o[1].lower())):
-        print(f'    {{"{model_name(name)}", "{display_name(name)}", 0.0f, false, kSkate{order.index(group)}}},')
+    """The host's kItems rows for the disc's catalogue (host/src/dropper_items.inc): the
+    dropper's objects (kSkate<n>), then Create-a-Park's pieces (kPark<n>), each group in
+    Skate's order (the recipe names' letter prefixes), a piece's three looks together."""
+    objects, _, _ = recipes(BigArchive(park))
+    props, park = list(CATEGORIES), list(PARK_CATEGORIES)
+    def key(o):
+        return (0, props.index(o[0])) if o[0] in CATEGORIES else (1, park.index(o[0]))
+    for group, name, _ in sorted(objects, key=lambda o: (*key(o), o[1].lower())):
+        tag = f'kSkate{props.index(group)}' if group in CATEGORIES else f'kPark{park.index(group)}'
+        print(f'    {{"{model_name(name)}", "{item_name(group, name)}", 0.0f, false, {tag}}},')
 
 
 if __name__ == '__main__':
