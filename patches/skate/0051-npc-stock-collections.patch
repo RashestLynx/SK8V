@@ -1,0 +1,32 @@
+diff --git a/crates/skate-data/src/collections.rs b/crates/skate-data/src/collections.rs
+index ca85d9e..9b1f015 100644
+--- a/crates/skate-data/src/collections.rs
++++ b/crates/skate-data/src/collections.rs
+@@ -26,13 +26,26 @@ pub struct Collections {
+     collections: Vec<Collection>,
+ }
+ 
++thread_local! {
++    static THREAD_OVERRIDE: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
++}
++
++/// SkateV: on the calling thread only, `load` reads `path` instead of the
++/// asset root's skater collections (NPC skaters ride Skate's stock tuning
++/// while the player keeps theirs). None restores the asset root's file.
++pub fn set_thread_override(path: Option<std::path::PathBuf>) {
++    THREAD_OVERRIDE.with(|o| *o.borrow_mut() = path);
++}
++
+ impl Collections {
+     pub fn entries(&self) -> &[Collection] {
+         &self.collections
+     }
+ 
+     pub fn load(asset_root: &Path) -> Result<Self, String> {
+-        let path = asset_root.join("private/stock/skater-collections.json");
++        let path = THREAD_OVERRIDE
++            .with(|o| o.borrow().clone())
++            .unwrap_or_else(|| asset_root.join("private/stock/skater-collections.json"));
+         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+         let data: Self = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+         if data.version != 1 {
