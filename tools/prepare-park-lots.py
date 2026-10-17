@@ -73,7 +73,7 @@ ARCHETYPE_FLAGS = 0x20020  # as the dropper's: Legacy CREATE_OBJECT needs bit 17
 LOD_DISTANCE = 600
 # Each lot: (key, display name, district, GTA origin of its floor centre, collision source): 'skate'
 # Skate 3's collision matched to what is drawn (Team HQ's holds every stage of the growing HQ),
-# 'skate-raw' its collision as it is (lots that do not grow), 'render' the drawn faces.
+# 'skate-raw' its collision as it is (its gaps stay: the Starter park's floor had holes), 'render' the drawn faces.
 # Far out west over the sea, apart (each Skate area is 128 m around the skater), 60 m above
 # the water (a fall lands in the sea; not up near the game's height limit); roofed halls. Team HQ's own collision is complete; Hartley Stadium's
 # ground is in simulation records nobody decodes yet (eb0027), so its visible geometry collides.
@@ -81,13 +81,14 @@ LOTS = [
     ('teamhq', 'Team HQ', 'DIST_IndustrialSkatePark', (-4600.0, -3400.0, 60.0), 'skate'),
     ('stadium', 'Hartley Stadium', 'DIST_MegaPark', (-4600.0, -2600.0, 60.0), 'render'),
     # Downtown Plaza: an open plaza ringed by city blocks (332 x 402 m, towers 165 m tall); its own collision.
-    ('downtown', 'Downtown Skate Park', 'DIST_DownTownSkatePark', (-4600.0, -1800.0, 60.0), 'skate-raw'),
+    ('downtown', 'Downtown Skate Park', 'DIST_DownTownSkatePark', (-4600.0, -1800.0, 60.0), 'skate'),
     # The starter park: a hall (137 x 112 m).
-    ('starter', 'Starter Park', 'DIST_StartPark', (-4600.0, -1000.0, 60.0), 'skate-raw'),
+    ('starter', 'Starter Park', 'DIST_StartPark', (-4600.0, -1000.0, 60.0), 'skate'),
     # The Maloof Money Cup contest course (147 x 281 m): its course is the level itself, no .park.
-    ('maloof', 'Maloof Money Cup', 'DIST_MaloofMoneyCup', (-4600.0, -200.0, 60.0), 'skate-raw'),
-    # Danny Way's skate school: hills and ramps, about 1 x 1.2 km; far out on its own.
-    ('skateschool', 'Skate School', 'DIST_SkateSchool', (-6200.0, -2000.0, 60.0), 'skate-raw'),
+    ('maloof', 'Maloof Money Cup', 'DIST_MaloofMoneyCup', (-4600.0, -200.0, 60.0), 'skate'),
+    # Danny Way's skate school: hills and ramps, about 1 x 1.2 km; far out on its own. Its drawn faces
+    # collide (Skate 3's collision there has gaps, and matching it to the drawing takes hours at this size).
+    ('skateschool', 'Skate School', 'DIST_SkateSchool', (-6200.0, -2000.0, 60.0), 'render'),
     # DIST_BlackBoxPark (the space park) is left out: its stream lacks assets its table names.
 ]
 # Skate 3's own park per lot (data/skatepark/<name>.park in miscload.big).
