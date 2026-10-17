@@ -458,8 +458,27 @@ XInputGetStateFn PadGetState() {
 // with no controller plugged in, Skate would otherwise stop between two presses.
 SvPad g_padScript{};
 DWORD g_padUntil = 0;
+// Dev 'padseq': timed pad states played one after another (an ollie is a right-stick flick
+// shorter than the dev command poll), each held for its ms from g_padSeqStart.
+struct PadStep { SvPad pad; DWORD ms; };
+std::vector<PadStep> g_padSeq;
+DWORD g_padSeqStart = 0;
 
 SvPad ReadPadRaw() {
+    if (!g_padSeq.empty()) {
+        DWORD at = GetTickCount() - g_padSeqStart, sum = 0;
+        for (const PadStep& step : g_padSeq) {
+            sum += step.ms;
+            if (at < sum) {
+                SvPad pad = step.pad;
+                pad.connected = 1;
+                static std::uint32_t s_seqPacket = 0x40000000;
+                pad.packet = ++s_seqPacket;
+                return pad;
+            }
+        }
+        g_padSeq.clear();  // played: back to the plain scripted pad (neutral)
+    }
     if (g_padUntil) {
         SvPad pad = static_cast<int>(GetTickCount() - g_padUntil) < 0 ? g_padScript : SvPad{};
         pad.connected = 1;
@@ -2795,8 +2814,12 @@ void DevCommand(Session& s) {
              hit ? "at" : "not found", ground, lifecycle::Name(s.state), parklot::Inside() ? 1 : 0, s.last.skater_position.x,
              s.last.skater_position.y, s.last.skater_position.z);
     } else if (verb == "tp") {
-        float x = 0, y = 0, z = 0;
-        if (words >> x >> y >> z) Call<void>(gta::SET_ENTITY_COORDS_NO_OFFSET, ped, x, y, z, 0, 0, 0);
+        // tp <x> <y> <z> [heading]
+        float x = 0, y = 0, z = 0, heading = 0;
+        if (words >> x >> y >> z) {
+            Call<void>(gta::SET_ENTITY_COORDS_NO_OFFSET, ped, x, y, z, 0, 0, 0);
+            if (words >> heading) Call<void>(gta::SET_ENTITY_HEADING, ped, heading);
+        }
     } else if (verb == "ipl" && (words >> what)) {
         Call<void>(gta::REQUEST_IPL, what.c_str());
         Logf("SkateV dev: REQUEST_IPL %s -> active %d", what.c_str(), Call<BOOL>(gta::IS_IPL_ACTIVE, what.c_str()) ? 1 : 0);
@@ -2820,6 +2843,34 @@ void DevCommand(Session& s) {
             g_padScript.right_trigger = static_cast<std::uint8_t>(std::clamp(rt, 0, 255));
             g_padUntil = GetTickCount() + static_cast<DWORD>(std::clamp(ms, 0, 60000));
             if (!g_padUntil) g_padUntil = 1;
+        }
+    } else if (verb == "padseq") {
+        // padseq <buttons hex> <lx> <ly> <rt> <rx> <ry> <ms> [; ...]: pad states played in order,
+        // each for its ms (then the scripted pad, neutral). Stick values -32767..32767, y up.
+        std::string rest;
+        std::getline(words, rest);
+        std::vector<PadStep> steps;
+        std::istringstream parts(rest);
+        for (std::string part; std::getline(parts, part, ';');) {
+            std::istringstream f(part);
+            std::string buttons;
+            int lx = 0, ly = 0, rt = 0, rx = 0, ry = 0, ms = 0;
+            if (!(f >> buttons >> lx >> ly >> rt >> rx >> ry >> ms)) continue;
+            PadStep step{};
+            step.pad.buttons = static_cast<std::uint16_t>(std::strtoul(buttons.c_str(), nullptr, 16));
+            step.pad.left_x = static_cast<std::int16_t>(std::clamp(lx, -32767, 32767));
+            step.pad.left_y = static_cast<std::int16_t>(std::clamp(ly, -32767, 32767));
+            step.pad.right_trigger = static_cast<std::uint8_t>(std::clamp(rt, 0, 255));
+            step.pad.right_x = static_cast<std::int16_t>(std::clamp(rx, -32767, 32767));
+            step.pad.right_y = static_cast<std::int16_t>(std::clamp(ry, -32767, 32767));
+            step.ms = static_cast<DWORD>(std::clamp(ms, 1, 10000));
+            steps.push_back(step);
+        }
+        if (!steps.empty()) {
+            g_padSeq = std::move(steps);
+            g_padSeqStart = GetTickCount();
+            if (!g_padUntil) g_padUntil = 1;  // the scripted pad stays connected afterwards
+            Logf("SkateV dev: pad sequence of %zu steps", g_padSeq.size());
         }
     } else if (verb == "walk") {
         // walk <dx> <dy> [speed]: the ped walks (1), runs (2) or sprints (3) straight that far

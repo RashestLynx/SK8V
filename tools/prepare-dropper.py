@@ -141,6 +141,42 @@ def model_name(recipe):
     return 'sk3_' + recipe.lower()
 
 
+# Rounded tops too shallow for Skate's rail finder (the drop past the crown is under its 3 inches,
+# the shoulders lie under the crown): a flat strip along the crown gives them the two lips Skate 3
+# grinds them on. Recipe name part -> strip half width along the crown (the collision rises at most
+# 3.5 cm), or None: one flat top over the whole upper band (the guard rail's two beams, 7 cm).
+GRIND_CAPS = {'fatroundrail': 0.066, 'canadianbarrier': 0.094, 'guardrailgrind': None}
+
+
+def grind_cap(recipe, tris):
+    part = next((p for p in GRIND_CAPS if p in recipe.lower()), None)
+    if part is None:
+        return tris
+    v = tris.reshape(-1, 3)
+    x0 = (v[:, 0].min() + v[:, 0].max()) / 2
+    if GRIND_CAPS[part] is None:  # lying along Y, level
+        band = v[v[:, 2] > v[:, 2].max() - 0.08]
+        half, x0 = (band[:, 0].max() - band[:, 0].min()) / 2, (band[:, 0].max() + band[:, 0].min()) / 2
+        crown = np.array([[band[:, 1].min(), v[:, 2].max()], [band[:, 1].max(), v[:, 2].max()]])
+    else:
+        half = GRIND_CAPS[part]
+        centre = np.round(v[np.abs(v[:, 0] - x0) < 0.01][:, 1:], 4)
+        crown = np.array([[y, centre[centre[:, 0] == y, 1].max()] for y in np.unique(centre[:, 0])])  # (y, top z) by y
+    cap = []
+    for (y0, z0), (y1, z1) in zip(crown[:-1], crown[1:]):
+        if y1 - y0 < 1e-3:
+            continue
+        a, b = [x0 - half, y0, z0], [x0 + half, y0, z0]
+        c, d = [x0 + half, y1, z1], [x0 - half, y1, z1]
+        cap += [[a, b, c], [a, c, d]]
+    cap = np.array(cap, np.float64)
+    if not len(cap):
+        raise ValueError(f'{recipe}: no crown for its grind cap')
+    n = np.cross(cap[:, 1] - cap[:, 0], cap[:, 2] - cap[:, 0])
+    cap[n[:, 2] < 0] = cap[n[:, 2] < 0][:, ::-1]  # facing up
+    return np.concatenate([tris, cap])
+
+
 def display_name(recipe):
     if recipe in NAMES:
         return NAMES[recipe]
@@ -434,7 +470,9 @@ def bounds(root, tris, material):
     for key, value in [('Type', material), ('ProceduralID', 0), ('RoomID', 0), ('PedDensity', 0)]:
         node(m, key, value=value)
     node(m, 'Flags', 'NONE'); node(m, 'MaterialColourIndex', value=0); node(m, 'Unk', value=0)
-    node(child, 'Vertices', '\n' + '\n'.join(', '.join(map(f, p)) for p in v) + '\n')
+    # relative to GeometryCenter: the file stores them quantised to +-half the box from it (CodeWalker's
+    # convention); model-space values past that were clamped, flattening each piece's lower half for GTA
+    node(child, 'Vertices', '\n' + '\n'.join(', '.join(map(f, p - (lo + hi) / 2)) for p in v) + '\n')
     polygons = node(child, 'Polygons')
     for a, b, c in polys:
         node(polygons, 'Triangle', m=0, v1=a, v2=b, v3=c, f1=0, f2=0, f3=0)
@@ -518,7 +556,7 @@ def convert(archive, objects, materials, textures, template, decal_template=None
         # centred on X/Y; Skate's ground stays z=0 (a laid pipe rests on it)
         shift = np.array([*(-(render.min(axis=0) + render.max(axis=0))[:2] / 2), -render.min(axis=0)[2] if laid else 0])
         meshes = [(p + shift, n, uv, faces, name) for p, n, uv, faces, name in meshes]
-        tris = np.array([[t.a, t.b, t.c] for m in collision for t in m.triangles], np.float64) @ C.T @ turn.T + shift
+        tris = grind_cap(recipe, np.array([[t.a, t.b, t.c] for m in collision for t in m.triangles], np.float64) @ C.T @ turn.T + shift)
         material = MATERIAL.get(recipe, category(group)[1])
         model = model_name(recipe) + (f'_{tint_hex(tint)}' if tint else '')
         root = ET.Element('Drawable'); node(root, 'Name', model)
