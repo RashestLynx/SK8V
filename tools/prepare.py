@@ -111,9 +111,9 @@ class Prepare:
             ('board-native', 'join', ['prepare-board-native.py'], self.stage_board_native),
             ('ped-colliders', 'join', ['prepare-ped-colliders.py', 'ped_collider_templates.py'], self.stage_ped_colliders),
             # join: after world, whose template index it adds to (a world rerun reruns it)
-            ('dropper', 'join', ['prepare-dropper.py'], self.stage_dropper),
+            ('dropper', 'join', ['prepare-dropper.py', 'rx2_materials.py'], self.stage_dropper),
             # join: after world, whose template index it adds to (a world rerun reruns it)
-            ('parks', 'join', ['prepare-park-lots.py', 'prepare-dropper.py'], self.stage_parks),
+            ('parks', 'join', ['prepare-park-lots.py', 'prepare-dropper.py', 'rx2_materials.py'], self.stage_parks),
             ('gta-vehicles', 'gta', ['gta_extract.py', 'build-vehicle-masses.py'], self.stage_vehicles),
             ('world', 'gta', [], self.stage_world),
             ('peds', 'gta', ['gta_extract.py'], self.stage_peds),

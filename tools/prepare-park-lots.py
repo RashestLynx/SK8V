@@ -58,6 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tools.owned_game.big import BigArchive  # noqa: E402
 import rx2_parser  # noqa: E402
 from mdl_parser import parse_rx2  # noqa: E402
+import rx2_materials  # noqa: E402
 from retail_collision_mesh import decode_rx2_clustered_meshes  # noqa: E402
 from skate3_streams import ASSET_TYPE_MODEL, ASSET_TYPE_TEXTURE, load_global_stream  # noqa: E402
 import xiso  # noqa: E402
@@ -265,7 +266,7 @@ def models(assets):
     for asset in assets:
         if asset.record.asset_type != ASSET_TYPE_MODEL:
             continue
-        parsed = parse_rx2(asset.data, strict=False)
+        parsed = rx2_materials.resolve(parse_rx2(asset.data, strict=False), asset.data)  # each mesh its own material
         meshes = []
         for mesh in parsed.meshes:
             if mesh.uvs is None or not len(mesh.faces):
@@ -423,6 +424,38 @@ def surface_points(t, step):
     return t[0] + np.outer(a[keep] / n, e1) + np.outer(b[keep] / n, e2)
 
 
+def split_long(p, faces, uv, longest=8.0):
+    """A render mesh with no edge over `longest` (each too-long edge halved, again and again;
+    shared edges split once, uvs interpolated). GTA leaves Skate 3's 60-100 m floor triangles
+    undrawn: the sea showed through the Maloof course's floor beside its spawn (2026-10-17)."""
+    p, uv = [*map(np.asarray, p)], [*map(np.asarray, uv)]
+    mids, out, todo = {}, [], [tuple(f) for f in faces]
+    while todo:
+        f = todo.pop()
+        edges = [float(np.linalg.norm(p[f[(i + 1) % 3]] - p[f[i]])) for i in range(3)]
+        i = int(np.argmax(edges))
+        if edges[i] <= longest:
+            out.append(f)
+            continue
+        a, b, c = f[i], f[(i + 1) % 3], f[(i + 2) % 3]
+        key = (min(a, b), max(a, b))
+        if key not in mids:
+            mids[key] = len(p)
+            p.append((p[a] + p[b]) / 2); uv.append((uv[a] + uv[b]) / 2)
+        m = mids[key]
+        todo += [(a, m, c), (m, b, c)]
+    return np.array(p), np.array(out, np.int64), np.array(uv)
+
+
+def split_fit(p, faces, uv):
+    """split_long within a GTA mesh's 65535 vertices (coarser where a huge mesh would not fit)."""
+    for longest in (8.0, 16.0, 32.0, 64.0):
+        q, f2, uv2 = split_long(p, faces, uv, longest)
+        if len(q) <= 65535:
+            return q, f2, uv2
+    return p, faces, uv
+
+
 def subdivide(t3, longest):
     """A face cut (longest edge in half, again and again) until no edge is longer than `longest`."""
     out, todo = [], [t3]
@@ -510,12 +543,60 @@ def add_visible(tris, render, top):
     return tris + added, len(missing)
 
 
-def boundary(tris, floor, height=8.0):
+def cover(faces, x0, y0, nx, ny, cell, corners=True):
+    """Which `cell`-metre cells (from x0, y0) the faces' plans cover (cell centres inside them;
+    with `corners`, also the cells their corners lie in: faces smaller than a cell count)."""
+    out = np.zeros((nx, ny), bool)
+    for t3 in faces:
+        lo = np.floor((t3[:, :2].min(axis=0) - [x0, y0]) / cell).astype(int)
+        hi = np.floor((t3[:, :2].max(axis=0) - [x0, y0]) / cell).astype(int)
+        lo, hi = np.maximum(lo, 0), np.minimum(hi, [nx - 1, ny - 1])
+        if (hi < lo).any():
+            continue
+        gx, gy = np.meshgrid(np.arange(lo[0], hi[0] + 1), np.arange(lo[1], hi[1] + 1), indexing='ij')
+        px, py = x0 + (gx + .5) * cell, y0 + (gy + .5) * cell
+        (ax, ay), (bx, by), (cx, cy) = t3[:, :2]
+        d = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+        if abs(d) < 1e-12:
+            if corners:
+                out[np.clip(((t3[:, 0] - x0) / cell).astype(int), 0, nx - 1), np.clip(((t3[:, 1] - y0) / cell).astype(int), 0, ny - 1)] = True
+            continue
+        l1 = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / d
+        l2 = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / d
+        inside = (l1 >= -1e-6) & (l2 >= -1e-6) & (1 - l1 - l2 >= -1e-6)
+        out[gx[inside], gy[inside]] = True
+        if corners:
+            out[np.clip(((t3[:, 0] - x0) / cell).astype(int), 0, nx - 1), np.clip(((t3[:, 1] - y0) / cell).astype(int), 0, ny - 1)] = True
+    return out
+
+
+def runs(mask, x0, y0, cell, longest=8.0):
+    """The mask's cells as rectangles (x0, y0, x1, y1): runs along x per row, cut to `longest`."""
+    out, step = [], max(1, int(longest / cell))
+    for j in range(mask.shape[1]):
+        i = 0
+        while i < mask.shape[0]:
+            if not mask[i, j]:
+                i += 1
+                continue
+            k = i
+            while k < mask.shape[0] and mask[k, j] and k - i < step:
+                k += 1
+            out.append((x0 + i * cell, y0 + j * cell, x0 + k * cell, y0 + (j + 1) * cell))
+            i = k
+    return out
+
+
+def boundary(tris, floor, render, height=8.0, cell=1.0):
     """Walls (both ways) round the floor's extent, from the floor `height` m up, and a plate
     2 cm under the floor across it: Team HQ's east doorways open onto nothing (Skate
     3's yard outside is not drawn), a ped walked out of them into the sea, and the
     floor had small holes (2026-10-16). Skate 3's own lots end in such invisible
-    boundaries too."""
+    boundaries too. Per `cell`: no plate over anything drawn lower than the floor (a lid
+    over Team HQ's 1.3 m pit, 2026-10-17), and under all of the plate ground is drawn
+    (`ground`: its rectangles; Downtown's floor extent ran 40 m past the drawn plaza and
+    part of the Maloof course's drawn floor does not show in GTA: the ped walked on the
+    sea, 2026-10-17). Returns (collision, ground)."""
     pts = np.array([v for t3 in tris if not steep(t3) and np.abs(t3[:, 2] - floor).max() < .05 for v in t3])
     (x0, y0), (x1, y1) = pts[:, :2].min(axis=0), pts[:, :2].max(axis=0)
     corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
@@ -525,10 +606,27 @@ def boundary(tris, floor, height=8.0):
         a1, b1 = a0 + [0, 0, height], b0 + [0, 0, height]
         for f in (np.array([a0, b0, b1]), np.array([a0, b1, a1])):
             out += [f, f[[0, 2, 1]]]
+    nx, ny = int(np.ceil((x1 - x0) / cell)), int(np.ceil((y1 - y0) / cell))
+    up = [r for r in render if not steep(r) and np.cross(r[1] - r[0], r[2] - r[0])[2] > 0]
+    sunken = cover([r for r in up if r[:, 2].mean() < floor - .1], x0, y0, nx, ny, cell)
     z = floor - .02
-    for f in (np.array([[x0, y0, z], [x1, y0, z], [x1, y1, z]]), np.array([[x0, y0, z], [x1, y1, z], [x0, y1, z]])):
-        out += subdivide(f, 8.0)  # the runtime's static area is tiled: no 130 m faces
-    return out
+    for a, b, c, d in runs(~sunken, x0, y0, cell):
+        for f in (np.array([[a, b, z], [c, b, z], [c, d, z]]), np.array([[a, b, z], [c, d, z], [a, d, z]])):
+            out += subdivide(f, 8.0)  # the runtime's static area is tiled: no 130 m faces
+    return out, runs(~sunken, x0, y0, cell, longest=16.0)  # also under drawn floor: GTA leaves some of it undrawn
+
+
+def ground_mesh(rects, floor, texture, tile=4.0):
+    """The drawn ground (a render mesh: points, faces, uvs, material, texture) over `rects`,
+    4 cm under the floor (under any drawn floor it meets; the plate is at 2 cm)."""
+    p, faces = [], []
+    z = floor - .04
+    for a, b, c, d in rects:
+        k = len(p)
+        p += [[a, b, z], [c, b, z], [c, d, z], [a, d, z]]
+        faces += [[k, k + 1, k + 2], [k, k + 2, k + 3]]
+    p = np.array(p, np.float64)
+    return p, np.array(faces, np.int64), p[:, :2] / tile, 'sk8v_ground', texture
 
 
 def face_up(tris, top, cell=2.0):
@@ -649,7 +747,7 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
     render = np.concatenate([p for _, meshes in parts for p, *_ in meshes])
     lo, hi = render.min(axis=0), render.max(axis=0)
     shift = np.array([-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, -lo[2]])  # centred, floor at 0
-    parts = [(asset, [(p + shift, faces, uv, material, texture) for p, faces, uv, material, texture in meshes])
+    parts = [(asset, [(*split_fit(p + shift, faces, uv), material, texture) for p, faces, uv, material, texture in meshes])
              for asset, meshes in parts]
     # The lot's collision, then each triangle to one piece: its own render faces
     # ('render'), or the piece whose footprint holds the triangle's centre ('skate').
@@ -670,7 +768,9 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
             print(f'{label}: collision where nothing is visible dropped ({before} faces in, {len(lot_tris)} out)', flush=True)
             lot_tris, shown = add_visible(lot_tris, render_tris, floor_height(lot_tris) + 20.0)
             print(f'{label}: {shown} visible faces with no collision there made to collide', flush=True)
-            lot_tris = lot_tris + boundary(lot_tris, floor_height(lot_tris))
+            level = floor_height(lot_tris)
+            walls, ground = boundary(lot_tris, level, render_tris)
+            lot_tris = lot_tris + walls
         if os.environ.get('SK8V_PARKS_DEBUG'):  # development: the lot's final collision, for checks
             np.save(Path(os.environ['SK8V_PARKS_DEBUG']) / f'{key}-collision.npy', np.array(lot_tris))
         for t3 in lot_tris:
@@ -681,6 +781,20 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
             else:
                 i = min(range(len(boxes)), key=lambda i: np.sum(((boxes[i][0] + boxes[i][1]) / 2 - c) ** 2))
             owned[i][0].append(t3); owned[i][1].append(CONCRETE)
+        if source == 'skate' and ground:
+            # its look: the texture most of the drawn floor wears
+            area = collections.Counter()
+            for _, meshes in parts:
+                for p, faces, _, _, texture in meshes:
+                    for face in faces:
+                        q = p[face]
+                        n = np.cross(q[1] - q[0], q[2] - q[0])
+                        if n[2] > 0 and abs(q[:, 2].mean() - level) < .1:
+                            area[texture] += np.linalg.norm(n) / 2
+            texture = area.most_common(1)[0][0] if area else None
+            parts.append(('ground', [ground_mesh(ground, level, texture)]))
+            owned.append(([], []))
+            print(f'{label}: ground drawn under its floor ({sum((c - a) * (d - b) for a, b, c, d in ground):.0f} m2)', flush=True)
     else:
         # The visible geometry collides. Its floor is not one level: along the model tiles'
         # seams some vertices sit 21 cm low, a ledge across Hartley Stadium's floor that threw

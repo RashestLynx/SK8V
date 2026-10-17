@@ -2810,9 +2810,11 @@ void DevCommand(Session& s) {
         const Vector3 p = Call<Vector3>(gta::GET_ENTITY_COORDS, ped, 1);
         float ground = 0.0f;
         const BOOL hit = Call<BOOL>(gta::GET_GROUND_Z_FOR_3D_COORD, p.x, p.y, p.z + 2.0f, &ground, 0, 0);
-        Logf("SkateV dev: ped at (%.2f, %.2f, %.2f), ground %s %.2f, state %s, in a park %d, skater (%.2f, %.2f, %.2f)", p.x, p.y, p.z,
+        float water = 0.0f;
+        const BOOL wet = Call<BOOL>(gta::GET_WATER_HEIGHT_NO_WAVES, p.x, p.y, p.z + 3.0f, &water);
+        Logf("SkateV dev: ped at (%.2f, %.2f, %.2f), ground %s %.2f, state %s, in a park %d, skater (%.2f, %.2f, %.2f), water %s %.2f", p.x, p.y, p.z,
              hit ? "at" : "not found", ground, lifecycle::Name(s.state), parklot::Inside() ? 1 : 0, s.last.skater_position.x,
-             s.last.skater_position.y, s.last.skater_position.z);
+             s.last.skater_position.y, s.last.skater_position.z, wet ? "at" : "none", water);
     } else if (verb == "tp") {
         // tp <x> <y> <z> [heading]
         float x = 0, y = 0, z = 0, heading = 0;

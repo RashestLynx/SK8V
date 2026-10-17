@@ -59,6 +59,7 @@ sys.path.insert(0, str(DONOR / 'tools/vendor/university/tools/vanilla_map_extrac
 from tools.owned_game.big import BigArchive  # noqa: E402
 import rx2_parser  # noqa: E402
 from mdl_parser import parse_rx2  # noqa: E402
+import rx2_materials  # noqa: E402
 from retail_collision_mesh import decode_rx2_clustered_meshes  # noqa: E402
 
 C = np.array([[1., 0, 0], [0, 0, -1], [0, 1, 0]])
@@ -520,7 +521,7 @@ def convert(archive, objects, materials, textures, template, decal_template=None
     for group, recipe, arena, *variant in objects:
         tint = variant[0] if variant else None
         raw = archive.read(models[arena])
-        parsed = parse_rx2(raw, strict=False)
+        parsed = rx2_materials.resolve(parse_rx2(raw, strict=False), raw)  # each mesh its own material
         collision = decode_rx2_clustered_meshes(raw)
         if not parsed.meshes or not collision:
             raise ValueError(f'{recipe}: no mesh or collision')
