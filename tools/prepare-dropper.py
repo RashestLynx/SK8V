@@ -146,7 +146,30 @@ def model_name(recipe):
 # the shoulders lie under the crown): a flat strip along the crown gives them the two lips Skate 3
 # grinds them on. Recipe name part -> strip half width along the crown (the collision rises at most
 # 3.5 cm), or None: one flat top over the whole upper band (the guard rail's two beams, 7 cm).
-GRIND_CAPS = {'fatroundrail': 0.066, 'canadianbarrier': 0.094, 'guardrailgrind': None}
+GRIND_CAPS = {'fatroundrail': 0.066, 'canadianbarrier': 0.094, 'guardrailgrind': None,
+              # a bent tube: the strip follows its crown round the bend (the low one's thinner tube grinds as is)
+              'raillongcornerbendmed': ('curve', 0.084)}
+
+
+def curve_cap(v, half):
+    """A strip along a bent tube's crown (its top vertices, chained), `half` to either side."""
+    top = v[:, 2].max()
+    crown = np.unique(np.round(v[v[:, 2] > top - 0.002], 4), axis=0)
+    d = np.linalg.norm(crown[:, None, :2] - crown[None, :, :2], axis=2)
+    chain = [int(np.unravel_index(d.argmax(), d.shape)[0])]  # from one end of the bend
+    while len(chain) < len(crown):
+        rest = [i for i in range(len(crown)) if i not in chain]
+        chain.append(min(rest, key=lambda i: d[chain[-1], i]))
+    pts = crown[chain]
+    tangent = np.gradient(pts[:, :2], axis=0)
+    normal = np.stack([-tangent[:, 1], tangent[:, 0]], axis=1)
+    normal /= np.linalg.norm(normal, axis=1, keepdims=True)
+    left = np.column_stack([pts[:, :2] + normal * half, pts[:, 2]])
+    right = np.column_stack([pts[:, :2] - normal * half, pts[:, 2]])
+    cap = []
+    for k in range(len(pts) - 1):
+        cap += [[left[k], right[k], right[k + 1]], [left[k], right[k + 1], left[k + 1]]]
+    return cap
 
 
 def grind_cap(recipe, tris):
@@ -155,6 +178,11 @@ def grind_cap(recipe, tris):
         return tris
     v = tris.reshape(-1, 3)
     x0 = (v[:, 0].min() + v[:, 0].max()) / 2
+    if isinstance(GRIND_CAPS[part], tuple):
+        cap = np.array(curve_cap(v, GRIND_CAPS[part][1]), np.float64)
+        n = np.cross(cap[:, 1] - cap[:, 0], cap[:, 2] - cap[:, 0])
+        cap[n[:, 2] < 0] = cap[n[:, 2] < 0][:, ::-1]  # facing up
+        return np.concatenate([tris, cap])
     if GRIND_CAPS[part] is None:  # lying along Y, level
         band = v[v[:, 2] > v[:, 2].max() - 0.08]
         half, x0 = (band[:, 0].max() - band[:, 0].min()) / 2, (band[:, 0].max() + band[:, 0].min()) / 2

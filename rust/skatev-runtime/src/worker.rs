@@ -721,7 +721,7 @@ fn run(
     let mut last_speed = 0.0f32;
     let mut last_root = bevy_math::Vec3::ZERO;
     // Airs as they end (take-off, time, height over the take-off, landing): ramp tests read them.
-    let mut air: Option<(u64, bevy_math::Vec3, bevy_math::Vec3, f32)> = None;
+    let mut air: Option<(u64, bevy_math::Vec3, bevy_math::Vec3, f32, f32, f32, bevy_math::Vec3, u64)> = None;
     let mut perf = Perf::new();
     let mut assist = BackwardsManAssist::new(BackwardsManConfig::default());
     let mut assist_packet = 0u32;
@@ -1580,21 +1580,29 @@ fn run(
             skater_velocity = snap.velocity;
             if let Some(a) = air.as_mut() {
                 a.3 = a.3.max(snap.root.z);
+                if snap.deck.z > a.5 {
+                    a.5 = snap.deck.z;
+                    a.7 = snap.tick;
+                }
             }
             if snap.state != last_state {
                 let airborne = |s: &str| s.contains("Air");
                 if airborne(&snap.state) && !airborne(&last_state) {
-                    air = Some((snap.tick, snap.root, snap.velocity, snap.root.z));
+                    air = Some((snap.tick, snap.root, snap.velocity, snap.root.z, snap.deck.z, snap.deck.z, snap.com_velocity, snap.tick));
                 } else if !airborne(&snap.state) && airborne(&last_state) {
-                    if let Some((tick, from, v, peak)) = air.take() {
+                    if let Some((tick, from, v, peak, deck0, deck_peak, com_v, peak_tick)) = air.take() {
                         log(&format!(
-                            "air tick={} for {:.2}s from=({:.2}, {:.2}, {:.2}) speed={:.2} up={:.2} peak +{:.2} m to=({:.2}, {:.2}, {:.2}) landed={} trick='{}'",
+                            "air tick={} for {:.2}s from=({:.2}, {:.2}, {:.2}) speed={:.2} up={:.2} peak +{:.2} m deck +{:.2} m (landing {:+.2} m) deck peak after {:.2}s com up={:.2} to=({:.2}, {:.2}, {:.2}) landed={} trick='{}'",
                             tick,
                             snap.tick.saturating_sub(tick) as f32 / 60.0,
                             from.x, from.y, from.z,
                             v.length(),
                             v.z,
                             peak - from.z,
+                            deck_peak - deck0,
+                            snap.deck.z - deck0,
+                            peak_tick.saturating_sub(tick) as f32 / 60.0,
+                            com_v.z,
                             snap.root.x, snap.root.y, snap.root.z,
                             snap.state,
                             snap.score.trick_name
@@ -2134,6 +2142,9 @@ fn present_for_camera(mesh: &mut Vec<skin::ShadedTri>, camera: Vec3) {
 struct Published {
     tick: u64,
     root: Vec3,
+    deck: Vec3,
+    /// Skate's centre-of-mass trajectory velocity (the physics' own launch, without the body's animation).
+    com_velocity: Vec3,
     velocity: Vec3,
     state: String,
     score: skate_host::ScoreView,
@@ -2244,6 +2255,8 @@ fn publish(
     let published = Published {
         tick: snap.tick,
         root: snap.root,
+        deck: snap.deck,
+        com_velocity: snap.quirk.com_trajectory_velocity,
         velocity: snap.velocity,
         state: snap.state.clone(),
         score: snap.score.clone(),
