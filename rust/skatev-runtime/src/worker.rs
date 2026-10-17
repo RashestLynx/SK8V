@@ -720,6 +720,8 @@ fn run(
     let mut prefs = SkaterPrefs::default();
     let mut last_speed = 0.0f32;
     let mut last_root = bevy_math::Vec3::ZERO;
+    // Airs as they end (take-off, time, height over the take-off, landing): ramp tests read them.
+    let mut air: Option<(u64, bevy_math::Vec3, bevy_math::Vec3, f32)> = None;
     let mut perf = Perf::new();
     let mut assist = BackwardsManAssist::new(BackwardsManConfig::default());
     let mut assist_packet = 0u32;
@@ -1576,7 +1578,29 @@ fn run(
             }
             skater_at = snap.root;
             skater_velocity = snap.velocity;
+            if let Some(a) = air.as_mut() {
+                a.3 = a.3.max(snap.root.z);
+            }
             if snap.state != last_state {
+                let airborne = |s: &str| s.contains("Air");
+                if airborne(&snap.state) && !airborne(&last_state) {
+                    air = Some((snap.tick, snap.root, snap.velocity, snap.root.z));
+                } else if !airborne(&snap.state) && airborne(&last_state) {
+                    if let Some((tick, from, v, peak)) = air.take() {
+                        log(&format!(
+                            "air tick={} for {:.2}s from=({:.2}, {:.2}, {:.2}) speed={:.2} up={:.2} peak +{:.2} m to=({:.2}, {:.2}, {:.2}) landed={} trick='{}'",
+                            tick,
+                            snap.tick.saturating_sub(tick) as f32 / 60.0,
+                            from.x, from.y, from.z,
+                            v.length(),
+                            v.z,
+                            peak - from.z,
+                            snap.root.x, snap.root.y, snap.root.z,
+                            snap.state,
+                            snap.score.trick_name
+                        ));
+                    }
+                }
                 if snap.state.starts_with("Grind") && !last_state.starts_with("Grind") {
                     log(&format!(
                         "grind entry tick={} pos=({:.2}, {:.2}, {:.2}) speed={:.2} from={} to={} trick='{}'",
