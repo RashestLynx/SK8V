@@ -254,21 +254,57 @@ class Textures:
             self.names[name] = cutout
         return name, self.names[name]
 
+    def layer(self, texture, role):
+        """A normal ('nm', as it is, opaque) or specular ('s', its brightest channel as grey) texture by id,
+        or None when the lot's stream does not hold it."""
+        if not texture or texture not in self.data:
+            return None
+        name = f'sk8v_{self.key}_{texture[2:]}_{role}'
+        if name not in self.names:
+            image = self.rgba(texture)
+            if role == 'nm':
+                image = image.copy(); image[:, :, 3] = 255
+            else:
+                grey = image[:, :, :3].max(axis=2)
+                image = np.dstack([grey, grey, grey, np.full_like(grey, 255)])
+            Image.fromarray(np.ascontiguousarray(image), 'RGBA').save(self.work / f'{name}.png')
+            self.names[name] = False
+        return name
+
     def common(self):
         for name, colour in [('sk8v_flat_nm', (128, 128, 255, 255)), ('sk8v_spec', (60, 60, 60, 255))]:
             Image.fromarray(np.full((4, 4, 4), colour, np.uint8), 'RGBA').save(self.work / f'{name}.png')
         return 'sk8v_flat_nm', 'sk8v_spec'
 
 
+# A material's normal and specular textures (ids), by its material name (its diffuse): the lots'
+# surfaces had a flat normal and one grey shine (2026-10-17). Skate 3's lightmaps, detail normals and
+# macro overlays (second UV sets, other blends) are not carried.
+CHANNELS = {}
+FLAT_NORMAL_ID = '0x0000043d03e3870a'  # default_normal
+
+
+def channel_id(value):
+    found = re.search(r'(0x[0-9A-Fa-f]{16})$', value or '')
+    return found.group(1).lower() if found and found.group(1).lower() != FLAT_NORMAL_ID else None
+
+
 def models(assets):
-    """Every render mesh in GTA space: (points, faces, uvs, material name, texture id)."""
+    """Every render mesh in GTA space: (points, faces, uvs, material name, texture id). Each material's
+    normal and specular texture ids go to CHANNELS."""
     out = []
     for asset in assets:
         if asset.record.asset_type != ASSET_TYPE_MODEL:
             continue
         parsed = rx2_materials.resolve(parse_rx2(asset.data, strict=False), asset.data)  # each mesh its own material
+        materials = rx2_materials.mesh_materials(asset.data)
+        if materials is not None and len(materials) != len(parsed.meshes):
+            materials = None
         meshes = []
-        for mesh in parsed.meshes:
+        for index, mesh in enumerate(parsed.meshes):
+            if materials and mesh.material_name:
+                CHANNELS.setdefault(mesh.material_name, {'normal': channel_id(materials[index].get('normal')),
+                                                         'specular': channel_id(materials[index].get('specular'))})
             if mesh.uvs is None or not len(mesh.faces):
                 continue
             # Skate 3's light effects (fx_*: projected light colours) drawn as walls are
@@ -295,16 +331,18 @@ def drawable(name, meshes, textures, template, flat, spec, tris=(), mats=()):
     shaders_used = []
     for p, faces, uv, material, texture in meshes:
         diffuse, cutout = textures.diffuse(texture)
-        shaders_used.append((diffuse, cutout))
-    buckets = (8 if any(c for _, c in shaders_used) else 0) | (1 if not all(c for _, c in shaders_used) else 0)
+        layers = CHANNELS.get(material, {})
+        shaders_used.append((diffuse, cutout, textures.layer(layers.get('normal'), 'nm') or flat,
+                             textures.layer(layers.get('specular'), 's')))
+    buckets = (8 if any(c for _, c, *_ in shaders_used) else 0) | (1 if not all(c for _, c, *_ in shaders_used) else 0)
     for level in ['High', 'Med', 'Low', 'Vlow']:
         node(root, 'LodDist' + level, value=9998)
     for level in ['High', 'Med', 'Low', 'Vlow']:
         node(root, 'Flags' + level, value=buckets if level == 'High' else 0)
     group = node(root, 'ShaderGroup'); dictionary = node(group, 'TextureDictionary'); shaders = node(group, 'Shaders')
     used = []
-    for diffuse, cutout in shaders_used:
-        names = {'DiffuseSampler': diffuse, 'BumpSampler': flat, 'SpecSampler': spec}
+    for diffuse, cutout, normal, shine in shaders_used:
+        names = {'DiffuseSampler': diffuse, 'BumpSampler': normal, 'SpecSampler': shine or spec}
         for texture in names.values():
             if texture not in used:
                 used.append(texture)
@@ -314,7 +352,7 @@ def drawable(name, meshes, textures, template, flat, spec, tris=(), mats=()):
             key = param.get('name')
             if key in names: param.find('Name').text = names[key]
             if key == 'wetnessMultiplier': param.set('x', '0.2')
-            if key == 'specularIntensityMult': param.set('x', '0.15')
+            if key == 'specularIntensityMult': param.set('x', '0.3' if shine else '0.15')  # as the dropper's pieces
             if key == 'specularFalloffMult': param.set('x', '40')
         shaders.append(shader)
     for texture in used:
@@ -747,7 +785,7 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
     render = np.concatenate([p for _, meshes in parts for p, *_ in meshes])
     lo, hi = render.min(axis=0), render.max(axis=0)
     shift = np.array([-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, -lo[2]])  # centred, floor at 0
-    parts = [(asset, [(*split_fit(p + shift, faces, uv), material, texture) for p, faces, uv, material, texture in meshes])
+    parts = [(asset, [(p + shift, faces, uv, material, texture) for p, faces, uv, material, texture in meshes])
              for asset, meshes in parts]
     # The lot's collision, then each triangle to one piece: its own render faces
     # ('render'), or the piece whose footprint holds the triangle's centre ('skate').
@@ -785,14 +823,15 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
             # its look: the texture most of the drawn floor wears
             area = collections.Counter()
             for _, meshes in parts:
-                for p, faces, _, _, texture in meshes:
+                for p, faces, _, material, texture in meshes:
                     for face in faces:
                         q = p[face]
                         n = np.cross(q[1] - q[0], q[2] - q[0])
                         if n[2] > 0 and abs(q[:, 2].mean() - level) < .1:
-                            area[texture] += np.linalg.norm(n) / 2
-            texture = area.most_common(1)[0][0] if area else None
-            parts.append(('ground', [ground_mesh(ground, level, texture)]))
+                            area[(material, texture)] += np.linalg.norm(n) / 2
+            material, texture = area.most_common(1)[0][0] if area else ('sk8v_ground', None)
+            ground_p, ground_faces, ground_uv, _, _ = ground_mesh(ground, level, texture)
+            parts.append(('ground', [(ground_p, ground_faces, ground_uv, material, texture)]))  # the floor's material, its maps too
             owned.append(([], []))
             print(f'{label}: ground drawn under its floor ({sum((c - a) * (d - b) for a, b, c, d in ground):.0f} m2)', flush=True)
     else:
@@ -812,7 +851,10 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
     for i, (asset, meshes) in enumerate(parts):
         name = f'sk8v_{key}_{i}'
         tris, mats = np.array(owned[i][0]).reshape(-1, 3, 3), owned[i][1]
-        root, used, polys = drawable(name, meshes, textures, template, flat, spec, tris, mats)
+        # drawn only: cut long triangles (collision keeps the faces as they are: cutting them moved the
+        # Skate School's spawn and opened cracks it fell through, 2026-10-17)
+        drawn = [(*split_fit(p, faces, uv), material, texture) for p, faces, uv, material, texture in meshes]
+        root, used, polys = drawable(name, drawn, textures, template, flat, spec, tris, mats)
         drawables.append(dict(name=name, root=root, used=used, asset=asset, meshes=len(meshes), tris=tris, mats=mats,
                               triangles=int(sum(len(m[1]) for m in meshes)), collision_polygons=polys))
     alltris = np.concatenate([d['tris'] for d in drawables if len(d['tris'])])
@@ -882,8 +924,11 @@ def export(skate, reference, rage, data, world, dropper_receipt=None):
         else:
             print('no Object Dropper receipt: the lots without their Skate 3 parks', flush=True)
         pngs = sorted(textures.glob('*.png'))
-        run_rage(rage, 'textures', 'encode', *[p for p in pngs if p.stem.endswith('_nm')], '-o', textures, '-f', 'bc1')
-        run_rage(rage, 'textures', 'encode', *[p for p in pngs if not p.stem.endswith('_nm')], '-o', textures)
+        # in batches: with the normal and specular maps one command line runs past Windows' limit
+        for normal, extra in ((True, ['-f', 'bc1']), (False, [])):
+            batch = [p for p in pngs if p.stem.endswith('_nm') == normal]
+            for at in range(0, len(batch), 150):
+                run_rage(rage, 'textures', 'encode', *batch[at:at + 150], '-o', textures, *extra)
         ydrs = []
         for item in lots:
             for d in item['drawables']:
