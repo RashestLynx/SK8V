@@ -19,6 +19,8 @@ RadioAuto=Skating
 RadioStation=Last
 RadioNextChord=0x0028
 RadioPrevChord=0x0024
+; RadioWheelHold: on the board, hold d-pad left this many ms to open GTA's radio wheel as in a car (world slows, right stick picks, let go to tune); 0 = off.
+RadioWheelHold=3500
 ; RealTime: 1 = GTA's clock follows your PC's local time. RealWeather: 1 = GTA's weather follows the real weather
 ;   where you are (Open-Meteo, no account). WeatherLocation: "lat,lon", a city name, or empty for your IP's location.
 ;   WeatherRefresh: minutes between fetches; WeatherFade: seconds GTA takes to change. Offline, GTA keeps its own weather.

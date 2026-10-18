@@ -83,6 +83,11 @@ struct Config {
     int radioAuto = 1;
     std::string radioStation = "Last";
     std::uint16_t radioNextChord = 0x0028, radioPrevChord = 0x0024;
+    // RadioWheelHold: on the board, d-pad left held this long (ms, gun away, no LB) opens
+    // GTA's radio wheel as in a car (0 = off). RadioWheelCam (dev): GTA's camera while it is up.
+    int radioWheelHold = 3500;
+    bool radioWheelCam = false;
+    float radioWheelSlow = 0.2f;  // RadioWheelSlow: time scale while it is up if GTA does not slow the world (0 = never)
     // Real-life clock and weather (real_world.h).
     bool realTime = false;
     bool realWeather = false;
@@ -259,6 +264,9 @@ const Key kKeys[] = {
     {"RadioStation", Store<&Config::radioStation>},
     {"RadioNextChord", Store<&Config::radioNextChord>},
     {"RadioPrevChord", Store<&Config::radioPrevChord>},
+    {"RadioWheelHold", Store<&Config::radioWheelHold>},
+    {"RadioWheelCam", Store<&Config::radioWheelCam>},
+    {"RadioWheelSlow", Store<&Config::radioWheelSlow>},
     {"RealTime", Store<&Config::realTime>},
     {"RealWeather", Store<&Config::realWeather>},
     {"WeatherLocation", Store<&Config::weatherLocation>},
@@ -764,6 +772,11 @@ struct Session {
     bool radioWanted = false, radioAutoOn = false, radioUserOff = false;
     DWORD radioKeepAt = 0;
     lifecycle::BoardAction radioNext, radioPrev;  // on-foot chords
+    // GTA's radio wheel on the board (BoardControls): d-pad left went down at, the wheel
+    // is up, opened at, the station it opened on, GTA's slow motion seen / ours applied.
+    DWORD radioLeftSince = 0, radioWheelAt = 0;
+    bool radioWheel = false, radioWheelSlow = false;
+    int radioWheelFrom = -1;
     DynamicWorld world;
     DWORD messageUntil = 0;
     std::string message;
@@ -1480,6 +1493,7 @@ void StopAim(Session& s, bool restoreCam) {
 // not walked: that walk cost a player 2.4 ms a frame for the ~310 calls
 // (8 us each against 0.08 on the owner's PC).
 bool g_weaponWheel = false;
+bool g_radioWheel = false;  // GTA's radio wheel up on the board: its controls stay GTA's
 
 // Script frames since each control last read non-zero. Only controls in use (or released within
 // the last frames, for GTA's just-released checks) are disabled: DISABLE_CONTROL_ACTION took
@@ -1494,6 +1508,7 @@ void DisableSkateControls(std::uint16_t buttons, bool aiming) {
         // INPUT_WEAPON_WHEEL_UD/LR/NEXT/PREV, SELECT_NEXT/PREV_WEAPON, SELECT_WEAPON
         // (and the look axes 1, 2: the pad's right stick, in case the wheel reads it there)
         skip[c] = (g_weaponWheel && ((c >= 12 && c <= 17) || c == 37 || c == 1 || c == 2)) ||
+                  (g_radioWheel && (c == 85 || c == 332 || c == 333 || c == 1 || c == 2)) ||
                   c == 199 || c == 200 || c == 170 || c == 288 || c == 289 || (c >= 296 && c <= 328) || c == 349 ||
                   (c == 19 && !(buttons & 0x0100)) ||
                   (aiming && (c == 1 || c == 2 || c == 24 || c == 25 || c == 45 || (c >= 270 && c <= 273) || (c >= 290 && c <= 295)));
@@ -1737,6 +1752,73 @@ void GameplayCam(Session& s) {
     Call<void>(gta::RENDER_SCRIPT_CAMS, 0, 1, kAimBlendMs, 1, 0, 0);
 }
 
+// GTA's radio wheel, as in a car: on the board, d-pad left held RadioWheelHold ms
+// (gun away, no LB) holds GTA's INPUT_VEH_RADIO_WHEEL until it is let go; the
+// right stick (INPUT_RADIO_WHEEL_UD/LR) picks and letting go tunes, as in a car.
+// The radio comes on first if it is off. While it is up, the right stick and
+// d-pad left do not reach Skate, Skate steps on wall time (as under the weapon
+// wheel) and the world slows: GTA's own slow motion, else 0.2x set here.
+void CloseRadioWheel(Session& s) {
+    s.radioWheel = g_radioWheel = false;
+    if (s.radioWheelSlow) Call<void>(gta::SET_TIME_SCALE, 1.0f);
+    s.radioWheelSlow = false;
+    if (g_config.radioWheelCam && s.cam && !s.aiming && !s.wheelOpen) Call<void>(gta::RENDER_SCRIPT_CAMS, 1, 1, kAimBlendMs, 1, 0, 0);
+    s.radioTrack = -1;
+    s.radioDue = GetTickCount() + 600;  // the banner names what was picked
+    Logf("SkateV Legacy: radio wheel closed after %u ms, station %d -> %d", GetTickCount() - s.radioWheelAt, s.radioWheelFrom,
+         Call<int>(gta::GET_PLAYER_RADIO_STATION_INDEX));
+}
+
+void RadioWheel(Session& s, const Config& cfg, SvPad& pad, std::uint16_t buttons, std::uint16_t pressed, bool dropping) {
+    const DWORD tick = GetTickCount();
+    if (pressed & 0x0004) s.radioLeftSince = tick;
+    const bool held = cfg.radioWheelHold > 0 && (buttons & 0x0004) && !(buttons & 0x0100) && !s.armed && !s.wheelOpen &&
+                      !dropping && !dropper::IsOpen();
+    if (!s.radioWheel) {
+        if (!held || tick - s.radioLeftSince < static_cast<DWORD>(cfg.radioWheelHold)) return;
+        if (!RadioActive()) RadioOn(s, -1, cfg.radioStation.c_str());
+        s.radioWheel = g_radioWheel = true;
+        s.radioWheelAt = tick;
+        s.radioWheelFrom = Call<int>(gta::GET_PLAYER_RADIO_STATION_INDEX);
+        if (cfg.radioWheelCam) GameplayCam(s);
+        Log("SkateV Legacy: radio wheel open");
+    } else if (!held) {
+        CloseRadioWheel(s);
+        return;
+    }
+    Call<void>(gta::ENABLE_CONTROL_ACTION, 0, 85, 1);
+    Call<BOOL>(gta::SET_CONTROL_VALUE_NEXT_FRAME, 0, 85, 1.0f);
+    if (g_padUntil) {  // a scripted pad (dev) never reaches GTA: its right stick goes in by hand
+        Call<BOOL>(gta::SET_CONTROL_VALUE_NEXT_FRAME, 0, 333, pad.right_x / 32767.0f);
+        Call<BOOL>(gta::SET_CONTROL_VALUE_NEXT_FRAME, 0, 332, -pad.right_y / 32767.0f);
+    }
+    pad.right_x = pad.right_y = 0;
+    pad.buttons &= static_cast<std::uint16_t>(~0x0004u);
+    // GTA's slow motion against the wall clock from 0.4 s to 0.9 s after opening (GTA's
+    // wheel is up from the second frame); without it, ours (RadioWheelSlow, 0 = never).
+    static DWORD s_gameAt = 0, s_wallAt = 0, s_logAt = 0, s_logGame = 0;
+    static int s_phase = 0;  // 0 waiting, 1 measuring, 2 decided
+    const DWORD game = static_cast<DWORD>(Call<int>(gta::GET_GAME_TIMER));
+    if (tick == s.radioWheelAt) s_phase = 0, s_logAt = tick, s_logGame = game;
+    if (s_phase == 0 && tick - s.radioWheelAt >= 400) s_gameAt = game, s_wallAt = tick, s_phase = 1;
+    if (s_phase == 1 && tick - s_wallAt >= 500) {
+        const float rate = static_cast<float>(game - s_gameAt) / static_cast<float>(tick - s_wallAt);
+        const bool ours = rate > 0.6f && cfg.radioWheelSlow > 0.0f;
+        Logf("SkateV Legacy: radio wheel clock: game %.2fx wall%s", rate, ours ? " (no slow motion from GTA: ours)" : "");
+        if (ours) Call<void>(gta::SET_TIME_SCALE, std::clamp(cfg.radioWheelSlow, 0.05f, 1.0f));
+        s.radioWheelSlow = ours;
+        s_phase = 2;
+    }
+    if (tick - s_logAt >= 500) {
+        const char* id = Call<const char*>(gta::GET_PLAYER_RADIO_STATION_NAME);
+        Logf("SkateV Legacy: radio wheel up: control %.2f, stick UD/LR %.2f/%.2f, station %s, game %.2fx wall",
+             Call<float>(gta::GET_CONTROL_NORMAL, 0, 85), Call<float>(gta::GET_CONTROL_NORMAL, 0, 332),
+             Call<float>(gta::GET_CONTROL_NORMAL, 0, 333), id ? id : "-",
+             static_cast<float>(game - s_logGame) / static_cast<float>(tick - s_logAt));
+        s_logAt = tick, s_logGame = game;
+    }
+}
+
 // Called with the pad about to go to Skate. Gun away: only the radio (LB +
 // d-pad left/right) is taken. Gun out: GTA runs the ped's player tasks, so its own
 // aim, attack, reload and weapon wheel act on the pad as on foot: LB/RB stand in
@@ -1761,6 +1843,7 @@ void BoardControls(Session& s, const Config& cfg, SvPad& pad) {
         if (pressed & 0x0008) StepRadio(s, 1);  // right: next station
         if (pressed & 0x0004) StepRadio(s, -1); // left: previous
     }
+    RadioWheel(s, cfg, pad, buttons, pressed, dropping);
     if (!(buttons & 0x0100))
         for (int d = 0; d < 4; ++d)
             if (cfg.gestures[d] < 0) pad.buttons &= static_cast<std::uint16_t>(~(1u << d));
@@ -2206,7 +2289,7 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         const float real = Call<float>(gta::GET_FRAME_TIME);
         const float game = Call<float>(gta::TIMESTEP);
         in.dt_seconds = std::isfinite(game) && game >= 0.0f && game <= real * 1.01f ? game : real;
-        if (s.wheelOpen && wall > 0.0f && wall < 0.25f) in.dt_seconds = wall;
+        if ((s.wheelOpen || s.radioWheel) && wall > 0.0f && wall < 0.25f) in.dt_seconds = wall;
     }
     in.aspect_ratio = Call<float>(gta::GET_ASPECT_RATIO, 0);
     in.pad = pad;
@@ -2887,6 +2970,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Action("Previous station", [&s] { StepRadio(s, -1); }),
         Action("Radio off", [&s] { RadioOff(s, true); }),
         Flag("Station shortcuts", "RadioControls", D.radioControls, Bound("RadioControls")),
+        Number("Radio wheel: hold d-pad left", "RadioWheelHold", static_cast<float>(D.radioWheelHold), 0, 6000, 500,
+               [](float v) { return v <= 0 ? std::string("Off") : Fixed("%.1f s")(v / 1000.0f); }, Bound("RadioWheelHold")),
         Chord("Next station on foot", "RadioNextChord", D.radioNextChord, true, Bound("RadioNextChord")),
         Chord("Previous station on foot", "RadioPrevChord", D.radioPrevChord, true, Bound("RadioPrevChord")),
     }});
@@ -3306,6 +3391,7 @@ void ScriptMain() {
         if (g_runtime.IsLoaded()) {
             LifecycleFrame(s, cfg, f6);
             if (s.aiming && s.state != LifeState::Skating) StopAim(s, false);
+            if (s.radioWheel && s.state != LifeState::Skating) CloseRadioWheel(s);
             if (s.wheelOpen && s.state != LifeState::Skating) {
                 s.wheelOpen = g_weaponWheel = false;
                 Call<void>(gta::HUD_FORCE_WEAPON_WHEEL, 0);
