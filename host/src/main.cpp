@@ -1629,6 +1629,7 @@ void RadioAuto(Session& s, const Config& cfg) {
             s.radioAutoOn = s.radioUserOff = false;
             return;
         }
+        s.radioUserOff = false;  // newly wanted: an earlier "off" no longer holds
     }
     if (!want || s.radioUserOff || RadioActive()) return;
     if (Call<BOOL>(gta::GET_MISSION_FLAG) || Call<BOOL>(gta::IS_CUTSCENE_ACTIVE) || gta::FrontendActive()) return;
@@ -3013,7 +3014,15 @@ void DevCommand(Session& s) {
                                                (g_gameDir + L"SkateVLegacy.ini").c_str());
                     if (it.apply) it.apply(value);
                 }
-        Logf("SkateV dev: set %s=%s (%s)", what.c_str(), value.c_str(), found ? "menu item" : "no such menu item");
+        if (const Key* k = found ? nullptr : FindKey(what)) {
+            // An INI-only key (WeatherLocation): stored, then the real-world options read again.
+            WritePrivateProfileStringW(L"SkateV", util::Wide(what).c_str(), util::Wide(value).c_str(),
+                                       (g_gameDir + L"SkateVLegacy.ini").c_str());
+            k->store(g_config, value);
+            ApplyRealWorld();
+            found = true;
+        }
+        Logf("SkateV dev: set %s=%s (%s)", what.c_str(), value.c_str(), found ? "applied" : "no such key");
     } else if (verb == "pos") {
         const Vector3 p = Call<Vector3>(gta::GET_ENTITY_COORDS, ped, 1);
         float ground = 0.0f;
