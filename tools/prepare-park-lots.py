@@ -308,6 +308,7 @@ def models(assets):
 
 
 LAYER_LIFT = .01  # m per layer: a lot mesh drawn over another in the same plane
+FLOOR_SNAP = .03  # m: a Skate 3 park piece's base this close to the lot's floor stands on it
 
 
 def layer_coplanar(parts, label, cell=2.0, tol=.01):
@@ -974,11 +975,28 @@ def export(skate, reference, rage, data, world, dropper_receipt=None):
                 records = park_records(parks.read(entry))
                 placed = layout(item, records, pieces, tinted)
                 # Their Skate collision, in the lot's space (its pieces stand at the origin, unturned).
-                for model, pos, q in placed:
+                # Skate 3's editor leaves pieces a few mm off the floor (here +-3 cm): each lip tripped
+                # the board at speed (a launch ramp's toe 9 mm up stopped it from 12 m/s, Hartley
+                # Stadium, 2026-10-18). Within FLOOR_SNAP of the lot's floor a piece stands on it.
+                floor_z = item['floor']
+                for n, (model, pos, q) in enumerate(placed):
                     if model not in cache:  # a tinted copy collides as its piece
                         cache[model] = read_svwc(templates_dir / f'{joaat(base_model.get(model, model)):08x}.svwc')
                     t3, m3 = cache[model]
-                    tris.append(t3 @ quat_matrix(q).T + (pos - np.array(item['origin']))); mats += m3
+                    t3 = t3 @ quat_matrix(q).T + (pos - np.array(item['origin']))
+                    off = t3[:, :, 2].min() - floor_z
+                    if abs(off) <= FLOOR_SNAP:
+                        if off:
+                            t3 = t3 - [0, 0, off]
+                            placed[n] = (model, pos - [0, 0, off], q)
+                        # Standing on the floor, a piece's bottom plate (downward faces at its base) lies in
+                        # the floor's plane: a wheel rolling onto a ramp's toe ran into its edge and stopped
+                        # dead (Hartley Stadium, 2026-10-18). Nothing reaches it from below: dropped.
+                        nz = np.cross(t3[:, 1] - t3[:, 0], t3[:, 2] - t3[:, 0])
+                        nz = nz[:, 2] / (np.linalg.norm(nz, axis=1) + 1e-12)
+                        keep = ~((nz < -.9) & (t3[:, :, 2].max(axis=1) < floor_z + .02))
+                        t3, m3 = t3[keep], [m for m, k in zip(m3, keep) if k]
+                    tris.append(t3); mats += m3
                 item['layout_tris'] = (np.concatenate(tris), mats) if tris else (np.zeros((0, 3, 3)), [])
                 clear_spawn(item, np.concatenate(tris) + np.array(item['origin']) if tris else np.zeros((0, 3, 3)))
                 rows = ['SK8VLAYOUT 1'] + [f'{joaat(m):08X} {p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {q[0]:.6f} {q[1]:.6f} {q[2]:.6f} {q[3]:.6f}'

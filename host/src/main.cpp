@@ -767,6 +767,7 @@ struct Session {
     bool savedCanRagdoll = true;
     bool savedVisible = true;
     bool savedCollisionDisabled = false;
+    int camAlpha = 255;  // the skater's fade while Skate's camera is right on it
     DWORD lastPedAudit = 0;
     std::uint32_t pedAuthorityCorrections = 0;
     // Where the script last put the ped: a ped found elsewhere was moved by something
@@ -1068,6 +1069,10 @@ void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
         }
         HoldPed(s, false);
         if (!Call<BOOL>(gta::IS_ENTITY_VISIBLE, s.ped)) Call<void>(gta::SET_ENTITY_VISIBLE, s.ped, s.savedVisible ? 1 : 0, 0);
+        if (s.camAlpha != 255) {
+            Call<void>(gta::RESET_ENTITY_ALPHA, s.ped);
+            s.camAlpha = 255;
+        }
         // GTA's camera looks where Skate's camera looked (no cut behind the player).
         if (std::isfinite(camHeading)) {
             float relative = camHeading - Call<float>(gta::GET_ENTITY_HEADING, s.ped);
@@ -2300,6 +2305,18 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         float fov = o.camera_fov * cfg.fovScale;
         fov = fov < 20.0f ? 20.0f : (fov > 120.0f ? 120.0f : fov);
         Call<void>(gta::SET_CAM_FOV, s.cam, fov);
+        // Skate 3's camera stops at a wall's hit point even right at the skater (positioner
+        // "too close"): along a tall box it ended inside the body (Team HQ, 2026-10-18).
+        // As GTA does with its own camera, the skater fades out under ~1 m and is gone under 0.45 m.
+        const float ax = o.camera_position.x - p.x, ay = o.camera_position.y - p.y;
+        const float az = o.camera_position.z - std::clamp(o.camera_position.z, p.z + 0.1f, p.z + 1.75f);  // to the body axis
+        const float camDist = std::sqrt(ax * ax + ay * ay + az * az);
+        const int alpha = camDist >= 1.0f ? 255 : (camDist <= 0.45f ? 0 : static_cast<int>((camDist - 0.45f) / 0.55f * 255.0f));
+        if (alpha != s.camAlpha) {
+            if (alpha >= 255) Call<void>(gta::RESET_ENTITY_ALPHA, s.ped);
+            else Call<void>(gta::SET_ENTITY_ALPHA, s.ped, alpha, 0);
+            s.camAlpha = alpha;
+        }
     } else {
         // Skate camera not published yet: plain chase view behind the skater.
         const float h = o.skater_heading_degrees * 0.01745329f;
