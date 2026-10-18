@@ -11,6 +11,23 @@ BoardTracks=1
 Snow=0
 ; RadioControls: 1 = LB + d-pad left/right steps GTA's radio while skating; 0 = off.
 RadioControls=1
+; RadioAuto: GTA's radio while skating. Skating = on while skating or in a skate.Park lot (off again after),
+;   Always = kept on whenever you are on foot, Off = only the shortcuts. Turned off by hand, it stays off until next time.
+; RadioStation: the station it comes on with (Last = GTA's last station, or an id such as RADIO_02_POP).
+; RadioNextChord / RadioPrevChord: on foot, the pad chord that steps the station (XInput mask; default Back + d-pad right / left).
+RadioAuto=Skating
+RadioStation=Last
+RadioNextChord=0x0028
+RadioPrevChord=0x0024
+; RealTime: 1 = GTA's clock follows your PC's local time. RealWeather: 1 = GTA's weather follows the real weather
+;   where you are (Open-Meteo, no account). WeatherLocation: "lat,lon", a city name, or empty for your IP's location.
+;   WeatherRefresh: minutes between fetches; WeatherFade: seconds GTA takes to change. Offline, GTA keeps its own weather.
+;   Both leave GTA alone during missions and cutscenes.
+RealTime=0
+RealWeather=0
+WeatherLocation=
+WeatherRefresh=15
+WeatherFade=45
 ; TrickAnalyzer: 1 = Skate 3's Trick Analyzer shows each trick's stick gesture (bottom centre); 0 = off.
 TrickAnalyzer=1
 DrawBoard=1

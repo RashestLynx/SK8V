@@ -33,6 +33,7 @@
 #include "menu.h"
 #include "object_dropper.h"
 #include "park_lot.h"
+#include "real_world.h"
 #include "ps_pad.h"
 #include "map_states.h"
 #include "pack_loader.h"
@@ -74,6 +75,20 @@ struct Config {
     // stick and A. Gun away: LB is Skate's; d-pad left/right steps the radio.
     bool boardAim = true;
     bool radioControls = true; // RadioControls=0: LB + d-pad left/right no longer steps the radio
+    // Music from GTA's radio (GTA's mobile radio, heard on foot and on the board).
+    // RadioAuto: Off (only the shortcuts), Skating (on while skating or in a
+    // skate.Park lot, off again after), Always (kept on whenever on foot).
+    // RadioStation: the station it comes on with (Last: GTA's last station).
+    // RadioNextChord / RadioPrevChord: on foot, step the station (Back + d-pad right / left).
+    int radioAuto = 1;
+    std::string radioStation = "Last";
+    std::uint16_t radioNextChord = 0x0028, radioPrevChord = 0x0024;
+    // Real-life clock and weather (real_world.h).
+    bool realTime = false;
+    bool realWeather = false;
+    std::string weatherLocation;  // "lat,lon", a city, or empty for the IP's location
+    int weatherRefresh = 15;      // minutes
+    float weatherFade = 45.0f;    // seconds
     bool trickAnalyzer = true; // TrickAnalyzer=1: Skate 3's Trick Analyzer (each trick's stick gesture)
     // Gun out: GTA animates the ped (its own aim, weapon and wheel tasks) and
     // Skate keeps the lower half. GunIK: 0 none, 1 arm IK (left hand onto the
@@ -238,6 +253,17 @@ const Key kKeys[] = {
     {"StallSampler", Store<&Config::stallSampler>},
     {"BoardAim", Store<&Config::boardAim>},
     {"RadioControls", Store<&Config::radioControls>},
+    {"RadioAuto", [](Config& c, const std::string& v) {
+         c.radioAuto = menu::SameText(v, "Off") || v == "0" ? 0 : menu::SameText(v, "Always") || v == "2" ? 2 : 1;
+     }},
+    {"RadioStation", Store<&Config::radioStation>},
+    {"RadioNextChord", Store<&Config::radioNextChord>},
+    {"RadioPrevChord", Store<&Config::radioPrevChord>},
+    {"RealTime", Store<&Config::realTime>},
+    {"RealWeather", Store<&Config::realWeather>},
+    {"WeatherLocation", Store<&Config::weatherLocation>},
+    {"WeatherRefresh", Store<&Config::weatherRefresh>},
+    {"WeatherFade", Store<&Config::weatherFade>},
     {"TrickAnalyzer", Store<&Config::trickAnalyzer>},
     {"GunIK", Store<&Config::gunIk>},
     {"GunProbe", Store<&Config::gunProbe>},
@@ -733,6 +759,11 @@ struct Session {
     DWORD backBlockUntil = 0;  // GTA's interaction menu blocked until (main loop)
     DWORD radioDue = 0;
     DWORD radioPoll = 0;
+    // RadioAuto: the radio is wanted now (skating / park / on foot), SK8V turned it
+    // on itself, the player turned it off by hand since, last keep-alive check.
+    bool radioWanted = false, radioAutoOn = false, radioUserOff = false;
+    DWORD radioKeepAt = 0;
+    lifecycle::BoardAction radioNext, radioPrev;  // on-foot chords
     DynamicWorld world;
     DWORD messageUntil = 0;
     std::string message;
@@ -1476,31 +1507,46 @@ void DisableSkateControls(std::uint16_t buttons, bool aiming) {
         if (!skip[c] && g_controlIdle[c] <= kControlHoldFrames) Call<void>(gta::DISABLE_CONTROL_ACTION, 0, c, 0);
 }
 
-// Radio while skating (GTA's mobile radio): +1 next station, -1 previous,
-// with "off" between the last and the first.
-void StepRadio(Session& s, int dir) {
-    const int n = Call<int>(gta::GET_NUM_UNLOCKED_RADIO_STATIONS);
-    if (n <= 0) return;
-    int cur = Call<BOOL>(gta::IS_MOBILE_PHONE_RADIO_ACTIVE) ? Call<int>(gta::GET_PLAYER_RADIO_STATION_INDEX) : 255;
-    if (cur < 0 || cur >= n) cur = n; // off
-    const int next = (cur + dir + n + 1) % (n + 1);
-    if (next == n) {
-        Call<void>(gta::SET_MOBILE_PHONE_RADIO_STATE, 0);
-        Call<void>(gta::SET_MOBILE_RADIO_ENABLED_DURING_GAMEPLAY, 0);
-        Call<void>(gta::SET_AUDIO_FLAG, "MobileRadioInGame", 0);
-        s.radioDue = 0;
-        if (!hudoverlay::ShowRadio("Radio Off", "", "", "OFF")) Notify(s, "Radio off", 1500);
-        return;
-    }
+// Radio (GTA's mobile radio, heard on foot and on the board). On the board the
+// TRAX banner shows it; on foot a line of text.
+bool RadioActive() { return Call<BOOL>(gta::IS_MOBILE_PHONE_RADIO_ACTIVE); }
+
+void RadioOff(Session& s, bool byPlayer) {
+    Call<void>(gta::SET_MOBILE_PHONE_RADIO_STATE, 0);
+    Call<void>(gta::SET_MOBILE_RADIO_ENABLED_DURING_GAMEPLAY, 0);
+    Call<void>(gta::SET_AUDIO_FLAG, "MobileRadioInGame", 0);
+    s.radioDue = 0;
+    s.radioAutoOn = false;
+    Logf("SkateV Legacy: radio off (%s)", byPlayer ? "player" : "auto");
+    if (!byPlayer) return;
+    s.radioUserOff = true;
+    if (s.state != LifeState::Skating || !hudoverlay::ShowRadio("Radio Off", "", "", "OFF")) Notify(s, "Radio off", 1500);
+}
+
+// On at station `index`, else at the station named `id` ("Last" or nullptr: GTA's last).
+void RadioOn(Session& s, int index, const char* id) {
     Call<void>(gta::SET_AUDIO_FLAG, "MobileRadioInGame", 1);
     Call<void>(gta::SET_MOBILE_RADIO_ENABLED_DURING_GAMEPLAY, 1);
     Call<void>(gta::SET_MOBILE_PHONE_RADIO_STATE, 1);
-    Call<void>(gta::SET_RADIO_TO_STATION_INDEX, next);
+    if (index >= 0) Call<void>(gta::SET_RADIO_TO_STATION_INDEX, index);
+    else if (id && *id && !menu::SameText(id, "Last")) Call<void>(gta::SET_RADIO_TO_STATION_NAME, id);
     // RadioTick shows the banner once the station's track is known.
     s.radioTrack = -1;
     s.radioDue = GetTickCount() + 1200;
-    const char* id = Call<const char*>(gta::GET_RADIO_STATION_NAME, next);
-    Logf("SkateV Legacy: radio station %d/%d %s", next, n, id ? id : "?");
+    s.radioUserOff = false;
+    const char* now = index >= 0 ? Call<const char*>(gta::GET_RADIO_STATION_NAME, index) : id;
+    Logf("SkateV Legacy: radio on, station %d %s", index, now ? now : "(GTA's last)");
+}
+
+// +1 next station, -1 previous, with "off" between the last and the first.
+void StepRadio(Session& s, int dir) {
+    const int n = Call<int>(gta::GET_NUM_UNLOCKED_RADIO_STATIONS);
+    if (n <= 0) return;
+    int cur = RadioActive() ? Call<int>(gta::GET_PLAYER_RADIO_STATION_INDEX) : 255;
+    if (cur < 0 || cur >= n) cur = n; // off
+    const int next = (cur + dir + n + 1) % (n + 1);
+    if (next == n) RadioOff(s, true);
+    else RadioOn(s, next, nullptr);
 }
 
 // Label text, or "" when the label does not exist.
@@ -1534,8 +1580,10 @@ bool TrackTextLoaded() {
     return false;
 }
 
-void RadioTick(Session& s) {
-    if (!Call<BOOL>(gta::IS_MOBILE_PHONE_RADIO_ACTIVE)) return;
+// On foot (board false) only a switch is shown, as text.
+void RadioTick(Session& s, bool board = true) {
+    if (!board && !s.radioDue) return;
+    if (!RadioActive()) return;
     const DWORD now = GetTickCount();
     if (now - s.radioPoll < 250) return;
     s.radioPoll = now;
@@ -1548,18 +1596,61 @@ void RadioTick(Session& s) {
     const std::string artist = track > 1 ? GameText(label) : std::string();
     const bool known = !song.empty();
     const bool due = s.radioDue && static_cast<int>(now - s.radioDue) >= 0;
-    if (!(known && track != s.radioTrack) && !due) return;
+    if (!(board && known && track != s.radioTrack) && !due) return;
     s.radioDue = 0;
     s.radioTrack = known ? track : 0;
     const char* id = Call<const char*>(gta::GET_PLAYER_RADIO_STATION_NAME);
     std::string station = GameText(id);
     if (station.empty()) station = id ? id : "Radio";
     // Station as the heading, then song, then artist.
-    const bool shown = known ? hudoverlay::ShowRadio(station.c_str(), song.c_str(), artist.c_str(), id ? id : "")
+    const bool shown = !board ? false : known ? hudoverlay::ShowRadio(station.c_str(), song.c_str(), artist.c_str(), id ? id : "")
                              : hudoverlay::ShowRadio(station.c_str(), "", "", id ? id : "");
     if (!shown) Notify(s, known ? song + " - " + artist : station, 2500);
     Logf("SkateV Legacy: radio banner track=%d station=%s song=%s artist=%s", track, id ? id : "?", song.c_str(),
          artist.c_str());
+}
+
+// RadioAuto: the radio comes on with RadioStation when it is wanted (Skating:
+// on the board or in a skate.Park lot; Always: on foot) and, if SK8V turned it
+// on, goes off again when it no longer is (never under a vehicle's own radio).
+// Turned off by hand, it stays off until the next time it is wanted.
+void RadioAuto(Session& s, const Config& cfg) {
+    const DWORD now = GetTickCount();
+    if (now - s.radioKeepAt < 500) return;
+    s.radioKeepAt = now;
+    const bool inVehicle = Call<BOOL>(gta::IS_PED_IN_ANY_VEHICLE, Call<Ped>(gta::PLAYER_PED_ID), 0);
+    const bool want = cfg.radioAuto == 2 ? !inVehicle
+                      : cfg.radioAuto == 1 ? !inVehicle && (s.state == LifeState::Skating || parklot::Inside())
+                                           : false;
+    if (want != s.radioWanted) {
+        s.radioWanted = want;
+        if (!want) {
+            if (s.radioAutoOn && !inVehicle && RadioActive()) RadioOff(s, false);
+            s.radioAutoOn = s.radioUserOff = false;
+            return;
+        }
+    }
+    if (!want || s.radioUserOff || RadioActive()) return;
+    if (Call<BOOL>(gta::GET_MISSION_FLAG) || Call<BOOL>(gta::IS_CUTSCENE_ACTIVE) || gta::FrontendActive()) return;
+    RadioOn(s, -1, cfg.radioStation.c_str());
+    s.radioAutoOn = true;
+}
+
+// On foot: RadioNextChord / RadioPrevChord step the station (on the board it is
+// LB + d-pad, BoardControls). GTA's own uses of Back and the d-pad (camera view,
+// pick up, detonate) are held off while a chord is down and just after.
+void RadioFoot(Session& s, const Config& cfg, std::uint16_t raw) {
+    const bool next = s.radioNext.Pressed(raw, cfg.radioNextChord);
+    const bool prev = s.radioPrev.Pressed(raw, cfg.radioPrevChord);
+    if (!cfg.radioControls || SkateOwnsPlayer(s) || menu::IsOpen() || dropper::IsOpen()) return;
+    const auto held = [raw](std::uint16_t m) { return m && (raw & m) == m; };
+    static DWORD blockUntil = 0;
+    if (held(cfg.radioNextChord) || held(cfg.radioPrevChord)) blockUntil = GetTickCount() + 500;
+    if (static_cast<int>(GetTickCount() - blockUntil) < 0)
+        for (int c : {0, 47, 51, 52, 244}) Call<void>(gta::DISABLE_CONTROL_ACTION, 0, c, 1);
+    if (Call<BOOL>(gta::IS_PED_IN_ANY_VEHICLE, Call<Ped>(gta::PLAYER_PED_ID), 0)) return;  // GTA's own radio there
+    if (next) StepRadio(s, 1);
+    if (prev) StepRadio(s, -1);
 }
 
 // While the gun is out GTA's arm IK (the left hand onto the grip) and, with
@@ -2650,6 +2741,40 @@ menu::Item Emote(const char* label, int direction, const Config& D) {
     return i;
 }
 
+std::vector<menu::Page> g_devPages;  // the menu's items, for the dev "set" command
+
+void ApplyRealWorld() {
+    const Config& c = g_config;
+    realworld::Configure({c.realTime, c.realWeather, c.weatherLocation, c.weatherRefresh, c.weatherFade});
+}
+
+// GTA's stations as the game has them unlocked (names from its own text), else the
+// story-mode list; the INI's current station is kept even if GTA does not list it.
+menu::Item StationItem(Session& s) {
+    std::vector<std::string> values{"Last"}, names{"GTA's last station"};
+    const int n = Call<int>(gta::GET_NUM_UNLOCKED_RADIO_STATIONS);
+    for (int i = 0; i < n && i < 64; ++i)
+        if (const char* id = Call<const char*>(gta::GET_RADIO_STATION_NAME, i); id && *id) values.push_back(id);
+    if (values.size() == 1)
+        for (const char* id : {"RADIO_01_CLASS_ROCK", "RADIO_02_POP", "RADIO_03_HIPHOP_NEW", "RADIO_04_PUNK", "RADIO_05_TALK_01",
+                               "RADIO_06_COUNTRY", "RADIO_07_DANCE_01", "RADIO_08_MEXICAN", "RADIO_09_HIPHOP_OLD",
+                               "RADIO_11_TALK_02", "RADIO_12_REGGAE", "RADIO_13_JAZZ", "RADIO_14_DANCE_02", "RADIO_15_MOTOWN",
+                               "RADIO_16_SILVERLAKE", "RADIO_17_FUNK", "RADIO_18_90S_ROCK", "RADIO_19_USER", "RADIO_20_THELAB"})
+            values.push_back(id);
+    const std::string cur = g_config.radioStation;
+    bool listed = false;
+    for (const std::string& v : values) listed = listed || menu::SameText(v, cur);
+    if (!listed && !cur.empty()) values.push_back(cur);
+    for (std::size_t i = 1; i < values.size(); ++i) {
+        const std::string name = GameText(values[i].c_str());
+        names.push_back(name.empty() ? values[i] : name);
+    }
+    Logf("SkateV Legacy: %zu radio stations in the menu (GTA lists %d)", values.size() - 1, n);
+    return menu::Choice("Station", "RadioStation", values, names, Bound("RadioStation", [&s] {
+        if (!menu::SameText(g_config.radioStation, "Last")) RadioOn(s, -1, g_config.radioStation.c_str());
+    }));
+}
+
 std::vector<menu::Page> MenuPages(Session& s) {
     using namespace menu;
     const Config D{};
@@ -2752,6 +2877,32 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Choice("Output", "AudioOutput", {"Gta", "Off"}, {"GTA mixer", "Off"}, {}, true),
     }});
 
+    pages.push_back({"Radio", {
+        Choice("Radio", "RadioAuto", {"Skating", "Always", "Off"},
+               {"On while skating and in parks", "Always on foot", "Only the shortcuts"},
+               Bound("RadioAuto", [&s] { s.radioWanted = s.radioUserOff = false; })),
+        StationItem(s),
+        Action("Next station", [&s] { StepRadio(s, 1); }),
+        Action("Previous station", [&s] { StepRadio(s, -1); }),
+        Action("Radio off", [&s] { RadioOff(s, true); }),
+        Flag("Station shortcuts", "RadioControls", D.radioControls, Bound("RadioControls")),
+        Chord("Next station on foot", "RadioNextChord", D.radioNextChord, true, Bound("RadioNextChord")),
+        Chord("Previous station on foot", "RadioPrevChord", D.radioPrevChord, true, Bound("RadioPrevChord")),
+    }});
+
+    pages.push_back({"Time and weather", {
+        Flag("Real-life clock", "RealTime", D.realTime, Bound("RealTime", ApplyRealWorld)),
+        Flag("Real-life weather", "RealWeather", D.realWeather, Bound("RealWeather", ApplyRealWorld)),
+        Number("Weather refresh", "WeatherRefresh", static_cast<float>(D.weatherRefresh), 5, 60, 5, Fixed("%.0f min"),
+               Bound("WeatherRefresh", ApplyRealWorld)),
+        Number("Weather fade", "WeatherFade", D.weatherFade, 0, 120, 15, Fixed("%.0f s"), Bound("WeatherFade", ApplyRealWorld)),
+        Action("Refresh weather now", [&s] {
+            realworld::Refresh();
+            Notify(s, g_config.realWeather ? "Fetching the weather..." : "Turn Real-life weather on first", 2000);
+        }),
+        Action("Show weather status", [&s] { Notify(s, realworld::Status(), 4000); }),
+    }});
+
     pages.push_back({"Controller and HUD", {
         Chord("Open menu (with /)", "MenuButton", D.life.menuButton, true, Bound("MenuButton")),
         Chord("Gun out / away", "GunButton", D.gunButton, false, Bound("GunButton")),
@@ -2759,7 +2910,6 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Chord("Fire", "FireButton", D.fireButton, false, Bound("FireButton")),
         Chord("BackwardsMan", "BackwardsManChord", D.backwardsManChord, false, Bound("BackwardsManChord", ApplyQuirk)),
         Flag("Skate during missions", "BoardActionInMissions", D.life.inMissions, Bound("BoardActionInMissions")),
-        Flag("Radio on LB + d-pad", "RadioControls", D.radioControls, Bound("RadioControls")),
         Flag("Original Skate HUD", "Hud", true, {}, true),
         Flag("Trick Analyzer", "TrickAnalyzer", D.trickAnalyzer,
              Bound("TrickAnalyzer", [] { hudoverlay::SetTrickAnalyzer(g_config.trickAnalyzer); })),
@@ -2823,6 +2973,47 @@ void DevCommand(Session& s) {
         else if (what == "exit") parklot::Exit();
     } else if (verb == "skate") {
         g_toggleRequested.store(true);
+    } else if (verb == "radio" && (words >> what)) {
+        // radio next | prev | off | on [station id] | state
+        if (what == "next") StepRadio(s, 1);
+        else if (what == "prev") StepRadio(s, -1);
+        else if (what == "off") RadioOff(s, true);
+        else if (what == "on") {
+            std::string id;
+            words >> id;
+            RadioOn(s, -1, id.empty() ? g_config.radioStation.c_str() : id.c_str());
+        }
+        const char* id = Call<const char*>(gta::GET_PLAYER_RADIO_STATION_NAME);
+        Logf("SkateV dev: radio active %d station %s index %d track %d, auto %d wanted %d", RadioActive() ? 1 : 0, id ? id : "-",
+             Call<int>(gta::GET_PLAYER_RADIO_STATION_INDEX), Call<int>(gta::GET_AUDIBLE_MUSIC_TRACK_TEXT_ID), g_config.radioAuto,
+             s.radioWanted ? 1 : 0);
+    } else if (verb == "weather") {
+        // weather [refresh]: the last fetch and GTA's weather now
+        if ((words >> what) && what == "refresh") realworld::Refresh();
+        Hash from = 0, to = 0;
+        float pct = 0;
+        Call<void>(gta::GET_CURR_WEATHER_STATE, &from, &to, &pct);
+        Logf("SkateV dev: weather %s; GTA %08X -> %08X %.2f", realworld::Status().c_str(), static_cast<unsigned>(from),
+             static_cast<unsigned>(to), pct);
+    } else if (verb == "clock") {
+        SYSTEMTIME t{};
+        GetLocalTime(&t);
+        Logf("SkateV dev: GTA clock %02d:%02d, PC %02u:%02u:%02u", Call<int>(gta::GET_CLOCK_HOURS), Call<int>(gta::GET_CLOCK_MINUTES),
+             t.wHour, t.wMinute, t.wSecond);
+    } else if (verb == "set" && (words >> what)) {
+        // set <IniKey> <value>: as the menu would (saved to the INI, applied live where the menu applies it)
+        std::string value;
+        std::getline(words >> std::ws, value);
+        bool found = false;
+        for (menu::Page& page : g_devPages)
+            for (menu::Item& it : page.items)
+                if (it.key == what) {
+                    found = true;
+                    WritePrivateProfileStringW(L"SkateV", util::Wide(what).c_str(), util::Wide(value).c_str(),
+                                               (g_gameDir + L"SkateVLegacy.ini").c_str());
+                    if (it.apply) it.apply(value);
+                }
+        Logf("SkateV dev: set %s=%s (%s)", what.c_str(), value.c_str(), found ? "menu item" : "no such menu item");
     } else if (verb == "pos") {
         const Vector3 p = Call<Vector3>(gta::GET_ENTITY_COORDS, ped, 1);
         float ground = 0.0f;
@@ -3044,7 +3235,10 @@ void ScriptMain() {
     parklot::SetRestore([](const parklot::Placed& p) {
         return dropper::Restore(p.model, {p.pos[0], p.pos[1], p.pos[2]}, {p.rot[0], p.rot[1], p.rot[2]});
     });
-    menu::Start(g_gameDir + L"SkateVLegacy.ini", MenuPages(s), RawPadButtons, Log);
+    g_devPages = MenuPages(s);
+    menu::Start(g_gameDir + L"SkateVLegacy.ini", g_devPages, RawPadButtons, Log);
+    realworld::Start(Log, [&s](const std::string& text) { Notify(s, text, 5000); });
+    ApplyRealWorld();
     FrameMonitor monitor;
     stall::SetLog(Log);
     // Line= may list several files separated by ';': the Dev menu replays the
@@ -3121,6 +3315,10 @@ void ScriptMain() {
         hudoverlay::Tick(s.state == LifeState::Skating);
         Lap(kPartHud);
         const auto raw = static_cast<std::uint16_t>(RawPadButtons());
+        RadioFoot(s, cfg, raw);
+        RadioAuto(s, g_config);
+        if (s.state != LifeState::Skating) RadioTick(s, false);
+        realworld::Tick();
         if (s.board.Pressed(raw, cfg.life.menuButton)) g_menuToggle.store(true);
         // GTA's interaction menu (INPUT_INTERACTION_MENU, Back) shares Back with the board's
         // weapon wheel and the menu chord: blocked while either is held and just after.

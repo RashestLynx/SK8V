@@ -170,6 +170,8 @@ inline std::string PageHint(const std::string& title) {
         {"Peds and vehicles", "Collision, launch and dent settings for pedestrians and vehicles."},
         {"BackwardsMan", "BackwardsMan trick model, direction and remount."},
         {"Audio", "Skate sound mix, played through GTA's audio."},
+        {"Radio", "GTA's radio while skating and on foot: station, shortcuts (LB + d-pad on the board, Back + d-pad on foot)."},
+        {"Time and weather", "GTA's clock at your PC's time and the weather where you live (Open-Meteo, set WeatherLocation in the INI)."},
         {"Controller and HUD", "Controller chords and the on-screen HUD."},
         {"Dev", "Developer options. Leave these alone unless testing."},
     };
