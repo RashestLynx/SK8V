@@ -307,6 +307,74 @@ def models(assets):
     return out
 
 
+LAYER_LIFT = .01  # m per layer: a lot mesh drawn over another in the same plane
+
+
+def layer_coplanar(parts, label, cell=2.0, tol=.01):
+    """Skate 3 blends some lot surfaces over others in the same plane (concrete tiles under spill stains,
+    a park floor under rust inlays, masonite over ramp wood); in GTA both are opaque at one depth and
+    flicker in and out (Downtown and Team HQ floors, 2026-10-18). A mesh whose faces lie inside a bigger
+    mesh's faces in the same plane (at least 1 m2 of them; meshes only meeting at a seam do not) is lifted
+    off it along its normals, LAYER_LIFT per layer. Drawing only: collision is untouched.
+    parts: [(asset, [(points, faces, uvs, material, texture)])] -> the same, overlays lifted."""
+    flat = [(pi, mi) for pi, (_, meshes) in enumerate(parts) for mi in range(len(meshes))]
+    tri = {}
+    for k in flat:
+        p, faces, *_ = parts[k[0]][1][k[1]]
+        q = p[faces]; n = np.cross(q[:, 1] - q[:, 0], q[:, 2] - q[:, 0]); a2 = np.linalg.norm(n, axis=1)
+        keep = a2 > 1e-6
+        tri[k] = (q[keep], n[keep] / a2[keep, None], a2[keep] / 2)
+    order = sorted(flat, key=lambda k: -tri[k][2].sum())  # biggest first: the base layer
+    index, layer = collections.defaultdict(list), {}  # grid cell -> faces of meshes placed so far
+
+    def samples(t, area):
+        """Points well inside a face (a fifth of the way in from its edges), about one per 0.5 m2."""
+        k = int(np.clip(np.ceil(np.sqrt(area / .5)), 1, 60))
+        s, r = np.meshgrid(np.linspace(.2, .8, k + 1), np.linspace(.2, .8, k + 1)); m = s + r <= .8
+        return t[0] + np.outer(s[m], t[1] - t[0]) + np.outer(r[m], t[2] - t[0]), area / max(1, m.sum())
+
+    def covered(pt, nn, below):
+        """Whether pt lies inside a placed face in its plane: that face's mesh."""
+        for owner, t, n2 in index.get(tuple(np.floor(pt / cell).astype(int)), ()):
+            if abs(n2 @ nn) < .995 or abs(n2 @ (pt - t[0])) > tol:
+                continue
+            v0, v1, v2 = t[1] - t[0], t[2] - t[0], pt - t[0]
+            d00, d01, d11, d20, d21 = v0 @ v0, v0 @ v1, v1 @ v1, v2 @ v0, v2 @ v1
+            den = d00 * d11 - d01 * d01
+            if abs(den) < 1e-12:
+                continue
+            v = (d11 * d20 - d01 * d21) / den; w = (d00 * d21 - d01 * d20) / den
+            if v >= -1e-4 and w >= -1e-4 and v + w <= 1 + 1e-4:
+                return owner
+        return None
+
+    for k in order:
+        q, n, area = tri[k]
+        hit, under = 0.0, []
+        for t, nn, a in zip(q, n, area):
+            pts, each = samples(t, a)
+            for pt in pts:
+                o = covered(pt, nn, k)
+                if o is not None:
+                    hit += each; under.append(layer[o])
+        layer[k] = (max(under) + 1) if hit >= 1.0 else 0
+        for t, nn in zip(q, n):
+            lo, hi = np.floor(t.min(axis=0) / cell).astype(int), np.floor(t.max(axis=0) / cell).astype(int)
+            for c in np.ndindex(*(hi - lo + 1)):
+                index[tuple(lo + c)].append((k, t, nn))
+    lifted = sum(1 for v in layer.values() if v)
+    out = []
+    for pi, (asset, meshes) in enumerate(parts):
+        ms = []
+        for mi, (p, faces, uv, material, texture) in enumerate(meshes):
+            if layer[(pi, mi)]:
+                p = p + vertex_normals(p, faces) * LAYER_LIFT * layer[(pi, mi)]
+            ms.append((p, faces, uv, material, texture))
+        out.append((asset, ms))
+    print(f'{label}: {lifted} of {len(flat)} meshes lie on another in the same plane: lifted off it', flush=True)
+    return out
+
+
 def drawable(name, meshes, textures, template, flat, spec, tris=(), mats=()):
     root = ET.Element('Drawable'); node(root, 'Name', name)
     allp = np.concatenate([m[0] for m in meshes])
@@ -836,6 +904,7 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
                 q[np.abs(q[:, 2] - floor) < .5, 2] = floor
                 for face in faces:
                     owned[i][0].append(q[face]); owned[i][1].append(m)
+    parts = layer_coplanar(parts, label)
     drawables = []
     for i, (asset, meshes) in enumerate(parts):
         name = f'sk8v_{key}_{i}'
