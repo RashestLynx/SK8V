@@ -67,6 +67,7 @@ _spec = importlib.util.spec_from_file_location('prepare_dropper', Path(__file__)
 dropper = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dropper)
 node, f, vec, tangents, bound_fields = dropper.node, dropper.f, dropper.vec, dropper.tangents, dropper.bound_fields
+park_records = dropper.park_records  # Skate 3's .park reader (one, shared with the tints)
 
 C = dropper.C
 YTYP = 'sk8v_parks'
@@ -126,24 +127,6 @@ def disc_file(skate, name, work):
     return target
 
 
-def park_records(data):
-    """A Skate 3 .park: (piece id, position, quaternion x y z w, tint r g b 0-255) per placed piece, in Skate's
-    district space. Big endian: a 0x40 byte header (piece count at 0x20), then 48 byte records:
-    id (u64), colour (3 floats, the editor's tint), position (3 floats), rotation (4 floats)."""
-    count = struct.unpack_from('>I', data, 0x20)[0]
-    out = []
-    for at in range(0x40, 0x40 + 48 * count, 48):
-        if at + 48 > len(data):
-            break
-        piece = struct.unpack_from('>Q', data, at)[0]
-        q = np.array(struct.unpack_from('>4f', data, at + 32), np.float64)
-        if np.linalg.norm(q) < .5:  # an empty slot
-            continue
-        tint = tuple(int(round(c * 255)) for c in struct.unpack_from('>3f', data, at + 8))
-        out.append((piece, np.array(struct.unpack_from('>3f', data, at + 20), np.float64), q / np.linalg.norm(q), tint))
-    return out
-
-
 def quat_matrix(q):
     x, y, z, w = q
     return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
@@ -189,6 +172,9 @@ def layout(item, records, pieces, tinted=None):
     if missing:
         print(f'{item["name"]}: {sum(missing.values())} pieces of its park are not dropper objects: {dict(missing)}', flush=True)
     return out
+
+
+DECAL_LIFT = .02  # m: a lot's decal meshes off the surface they lie on
 
 
 def read_svwc(path):
@@ -759,19 +745,22 @@ def clear_spawn(item, park_tris, room=2.5, headroom=3.0):
     centres = tall.mean(axis=1)[:, :2]
     lo, hi = tall[:, :, :2].min(axis=1), tall[:, :, :2].max(axis=1)
 
-    def blocked(p):
+    def blocked(p, room):
         near = np.all((p[:2] >= lo - room) & (p[:2] <= hi + room), axis=1)
         return near.any()
-    if not blocked(spawn):
-        return
+    # the most open floor there is, up to 8 m around (2.5 m left Hartley Stadium's spawn facing a mega
+    # ramp's side 2.6 m away, 2026-10-18), nearest the old spawn
     order = np.argsort(np.sum((item['floor_points'][:, :2] - spawn[:2]) ** 2, axis=1))
-    for i in order:
-        p = item['floor_points'][i]
-        if abs(p[2] - floor_z) < 0.05 and not blocked(p):
+    on_floor = [i for i in order if abs(item['floor_points'][i][2] - floor_z) < 0.05]
+    for space in (8.0, 6.0, 4.0, room):
+        if not blocked(spawn, space):
+            return
+        p = next((item['floor_points'][i] for i in on_floor if not blocked(item['floor_points'][i], space)), None)
+        if p is not None:
             moved = np.array([p[0], p[1], spawn[2]])
             item['exit'] = (np.array(item['exit']) + moved - spawn).round(3).tolist()
             item['spawn'] = moved.round(3).tolist()
-            print(f'{item["name"]}: spawn moved off its Skate 3 park to {item["spawn"]}', flush=True)
+            print(f'{item["name"]}: spawn moved off its Skate 3 park to {item["spawn"]} ({space:g} m clear)', flush=True)
             return
 
 
@@ -854,6 +843,12 @@ def lot(key, label, district, origin, source, skate, work, template, textures_ou
         # drawn only: cut long triangles (collision keeps the faces as they are: cutting them moved the
         # Skate School's spawn and opened cracks it fell through, 2026-10-17)
         drawn = [(*split_fit(p, faces, uv), material, texture) for p, faces, uv, material, texture in meshes]
+        # Skate 3 draws its world surfaces from both sides; GTA culls back faces: the Maloof arena's wall
+        # behind its banners was sky from inside (2026-10-17). Each mesh again, turned round (own vertices,
+        # so its normals face the other way). Decals sit on their surface: lifted off it, they stop flickering.
+        drawn = [(p + vertex_normals(p, faces) * DECAL_LIFT if 'decal' in (material or '').lower() else p, faces, uv, material, texture)
+                 for p, faces, uv, material, texture in drawn]
+        drawn += [(p, faces[:, ::-1], uv, material, texture) for p, faces, uv, material, texture in drawn]
         root, used, polys = drawable(name, drawn, textures, template, flat, spec, tris, mats)
         drawables.append(dict(name=name, root=root, used=used, asset=asset, meshes=len(meshes), tris=tris, mats=mats,
                               triangles=int(sum(len(m[1]) for m in meshes)), collision_polygons=polys))
@@ -905,10 +900,11 @@ def export(skate, reference, rage, data, world, dropper_receipt=None):
             parks = BigArchive(disc_file(skate, PARKS_BIG, work))
             for item in [i for i in lots if i['key'] in LAYOUTS]:
                 entry = next(e for e in parks.entries if e.path.lower() == f'data/skatepark/{LAYOUTS[item["key"]].lower()}.park')
-                placed = layout(item, park_records(parks.read(entry)), pieces, tinted)
-                # Their Skate collision, in the lot's space (its pieces stand at the origin, unturned).
                 templates_dir, cache, tris, mats = world.with_suffix('.prop-models'), {}, [], []
                 base_model = {o['model']: o.get('variant_of', o['model']) for o in objects}
+                records = park_records(parks.read(entry))
+                placed = layout(item, records, pieces, tinted)
+                # Their Skate collision, in the lot's space (its pieces stand at the origin, unturned).
                 for model, pos, q in placed:
                     if model not in cache:  # a tinted copy collides as its piece
                         cache[model] = read_svwc(templates_dir / f'{joaat(base_model.get(model, model)):08x}.svwc')

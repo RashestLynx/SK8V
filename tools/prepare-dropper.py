@@ -445,14 +445,37 @@ def park_tints(miscload, archive):
     for entry in parks.entries:
         if entry.path.lower() not in PARK_LAYOUTS:
             continue
-        data = parks.read(entry)
-        count = struct.unpack_from('>I', data, 0x20)[0]
-        for at in range(0x40, min(0x40 + 48 * count, len(data) - 47), 48):
-            name = names.get(f'0x{struct.unpack_from(">Q", data, at)[0]:016x}')
-            tint = tuple(int(round(c * 255)) for c in struct.unpack_from('>3f', data, at + 8))
+        for piece, _, _, tint in park_records(parks.read(entry)):
+            name = names.get(f'0x{piece:016x}')
             if name and tint != (255, 255, 255) and all(0 <= c <= 255 for c in tint):
                 out.add((name, tint))
     return sorted(out)
+
+
+def park_records(data):
+    """A Skate 3 .park: [(piece id, position, quaternion x y z w, tint r g b 0-255)] per placed piece, in Skate's
+    district space. Big endian; the piece count at 0x20. Each piece is colour (3 floats, the editor's tint),
+    position (3 floats), rotation (4 floats), then its id (u64): 48 bytes whose id ends them, so piece k's id
+    sits at 0x40 + 48k after its transform. The first piece's position and rotation sit in the header (0x24,
+    0x30), with no colour. Read the other way round (id first) every piece took its neighbour's place: stairs
+    under decks, pads on quarter pipes (Skate 3's live piece list in Xenia showed it, 2026-10-17)."""
+    count = struct.unpack_from('>I', data, 0x20)[0]
+    out = []
+    for k in range(count):
+        at = 0x40 + 48 * k
+        if at + 8 > len(data):
+            break
+        piece = struct.unpack_from('>Q', data, at)[0]
+        if k == 0:
+            pos, q, tint = struct.unpack_from('>3f', data, 0x24), struct.unpack_from('>4f', data, 0x30), (255, 255, 255)
+        else:
+            tint = tuple(int(round(c * 255)) for c in struct.unpack_from('>3f', data, at - 40))
+            pos, q = struct.unpack_from('>3f', data, at - 28), struct.unpack_from('>4f', data, at - 16)
+        q = np.array(q, np.float64)
+        if np.linalg.norm(q) < .5:  # an empty slot
+            continue
+        out.append((piece, np.array(pos, np.float64), q / np.linalg.norm(q), tint))
+    return out
 
 
 def bound_fields(parent, lo, hi, margin, material, poly_flags):
